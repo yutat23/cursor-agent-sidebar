@@ -713,6 +713,90 @@ body {
   border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
 }
 
+.context-tray {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px 0;
+}
+
+.context-tray.hidden {
+  display: none;
+}
+
+.context-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 75%, var(--vscode-sideBar-background));
+}
+
+.context-chip.is-missing {
+  border-color: var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+}
+
+.context-kind {
+  flex-shrink: 0;
+  min-width: 44px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+}
+
+.context-body {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.context-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--vscode-foreground);
+}
+
+.context-detail,
+.context-error {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.context-error {
+  color: var(--vscode-errorForeground);
+}
+
+.context-remove {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--vscode-descriptionForeground);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.context-remove:hover {
+  background: var(--vscode-list-hoverBackground);
+  color: var(--vscode-foreground);
+}
+
 .attachment-tray {
   display: flex;
   flex-wrap: wrap;

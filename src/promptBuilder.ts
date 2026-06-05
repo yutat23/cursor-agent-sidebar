@@ -1,11 +1,22 @@
 import * as fs from "node:fs/promises";
 import * as nodePath from "node:path";
 import { PromptContentBlock } from "./acpClient";
-import { loadSlashContent, readFolderContext } from "./contextCatalog";
+import { estimateFolderContext, loadSlashContent, readFolderContext } from "./contextCatalog";
 
 export interface PromptImageAttachment {
   mimeType: string;
   data: string;
+}
+
+export interface PromptContextPreviewItem {
+  id: string;
+  token: string;
+  replaceText: string;
+  label: string;
+  kind: "file" | "folder" | "command" | "missing";
+  status: "ready" | "missing";
+  detail: string;
+  chars: number;
 }
 
 const AT_REF = /@([^\s@]+)/g;
@@ -110,4 +121,93 @@ export async function buildPromptBlocks(
   }
 
   return blocks;
+}
+
+export async function getPromptContextPreview(
+  rawText: string,
+  workspaceRoot: string
+): Promise<PromptContextPreviewItem[]> {
+  const trimmed = rawText.trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const items: PromptContextPreviewItem[] = [];
+  const slashMatch = trimmed.match(SLASH_PREFIX);
+  if (slashMatch) {
+    const name = slashMatch[1];
+    const slashBody = await loadSlashContent(name, workspaceRoot);
+    items.push({
+      id: `slash:${name}`,
+      token: `/${name}`,
+      replaceText: `/${name}`,
+      label: `/${name}`,
+      kind: slashBody ? "command" : "missing",
+      status: slashBody ? "ready" : "missing",
+      detail: slashBody ? "Command / Skill" : "見つかりません",
+      chars: slashBody?.length ?? 0,
+    });
+  }
+
+  const refs = [...trimmed.matchAll(AT_REF)];
+  const seen = new Set<string>();
+  for (const match of refs) {
+    const token = match[1];
+    if (seen.has(token)) {
+      continue;
+    }
+    seen.add(token);
+
+    const normalizedToken = token.replace(/\/$/, "");
+    const resolved = resolveAtPath(normalizedToken, workspaceRoot);
+    const label = token;
+    const replaceText = `@${token}`;
+
+    try {
+      const stat = await fs.stat(resolved);
+      if (stat.isDirectory()) {
+        const estimate = await estimateFolderContext(resolved);
+        items.push({
+          id: `folder:${normalizedToken}`,
+          token: `@${token}`,
+          replaceText,
+          label,
+          kind: "folder",
+          status: "ready",
+          detail: `${estimate.files} files`,
+          chars: estimate.chars,
+        });
+        continue;
+      }
+
+      if (stat.isFile()) {
+        items.push({
+          id: `file:${normalizedToken}`,
+          token: `@${token}`,
+          replaceText,
+          label,
+          kind: "file",
+          status: "ready",
+          detail: nodePath.basename(normalizedToken),
+          chars: Math.min(stat.size, 40_000),
+        });
+        continue;
+      }
+    } catch {
+      // fall through to missing item
+    }
+
+    items.push({
+      id: `missing:${normalizedToken}`,
+      token: `@${token}`,
+      replaceText,
+      label,
+      kind: "missing",
+      status: "missing",
+      detail: "見つかりません",
+      chars: 0,
+    });
+  }
+
+  return items;
 }

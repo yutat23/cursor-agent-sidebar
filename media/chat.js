@@ -25,6 +25,7 @@
   const diagnosticsPanel = document.getElementById("diagnosticsPanel");
   const taskStatus = document.getElementById("taskStatus");
   const taskLabel = document.getElementById("taskLabel");
+  const contextTray = document.getElementById("contextTray");
   const attachmentTray = document.getElementById("attachmentTray");
 
   const MAX_IMAGE_ATTACHMENTS = 4;
@@ -58,6 +59,8 @@
   let suggestState = null;
   let suggestTimer = null;
   let suggestRequestId = 0;
+  let contextPreviewTimer = null;
+  let contextPreviewText = "";
   let isComposing = false;
 
   function requestCancel() {
@@ -151,6 +154,84 @@
         <pre class="diagnostic-output">${escapeHtml(result.output || "")}</pre>
       `;
       diagnosticsPanel.appendChild(row);
+    }
+  }
+
+  function hasContextReference(text) {
+    return /(^|\n)\/[\w-]+/.test(text.trim()) || /@([^\s@]+)/.test(text);
+  }
+
+  function formatChars(chars) {
+    if (!chars) {
+      return "0 chars";
+    }
+    if (chars >= 1000) {
+      return `${(chars / 1000).toFixed(chars >= 10000 ? 0 : 1)}k chars`;
+    }
+    return `${chars} chars`;
+  }
+
+  function queueContextPreview() {
+    clearTimeout(contextPreviewTimer);
+    const text = inputEl.value;
+    contextPreviewText = text;
+
+    if (!sessionReady || busy || !hasContextReference(text)) {
+      renderContextPreview([]);
+      return;
+    }
+
+    contextPreviewTimer = setTimeout(() => {
+      vscode.postMessage({ type: "requestContextPreview", text });
+    }, 180);
+  }
+
+  function removeContextReference(item) {
+    if (!item?.replaceText) {
+      return;
+    }
+    const escaped = item.replaceText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    inputEl.value = inputEl.value.replace(new RegExp(`${escaped}\\s?`, "g"), "");
+    inputEl.focus();
+    inputEl.dispatchEvent(new Event("input"));
+  }
+
+  function renderContextPreview(items, error) {
+    if (!contextTray) {
+      return;
+    }
+
+    contextTray.innerHTML = "";
+    if (error) {
+      contextTray.classList.remove("hidden");
+      const errorEl = document.createElement("div");
+      errorEl.className = "context-error";
+      errorEl.textContent = error;
+      contextTray.appendChild(errorEl);
+      return;
+    }
+
+    if (!items?.length) {
+      contextTray.classList.add("hidden");
+      return;
+    }
+
+    contextTray.classList.remove("hidden");
+    for (const item of items) {
+      const chip = document.createElement("div");
+      chip.className = `context-chip${item.status === "missing" ? " is-missing" : ""}`;
+      const kindLabel =
+        item.kind === "folder" ? "Folder" : item.kind === "command" ? "Prompt" : item.kind === "missing" ? "Missing" : "File";
+      chip.innerHTML = `
+        <span class="context-kind">${kindLabel}</span>
+        <span class="context-body">
+          <span class="context-label" title="${escapeHtml(item.label || "")}">${escapeHtml(item.label || "")}</span>
+          <span class="context-detail">${escapeHtml(item.detail || "")} · ${formatChars(item.chars || 0)}</span>
+        </span>
+        <button class="context-remove" type="button" aria-label="Remove context">×</button>
+      `;
+      chip.querySelector(".context-remove").addEventListener("click", () => removeContextReference(item));
+      contextTray.appendChild(chip);
     }
   }
 
@@ -1154,6 +1235,7 @@
     closeSuggestMenu();
     vscode.postMessage({ type: "send", text, images: getAttachmentsForSend() });
     inputEl.value = "";
+    renderContextPreview([]);
     clearAttachments();
     inputEl.style.height = "auto";
   }
@@ -1243,6 +1325,7 @@
     inputEl.style.height = "auto";
     inputEl.style.height = `${Math.min(inputEl.scrollHeight, 140)}px`;
     updateSuggestFromInput();
+    queueContextPreview();
   });
 
   inputEl.addEventListener("click", updateSuggestFromInput);
@@ -1330,6 +1413,7 @@
         threadEl.innerHTML = "";
         resetTurnState();
         clearAttachments();
+        renderContextPreview([]);
         setRunning(false, false);
         dismissPermissionCards();
         break;
@@ -1498,6 +1582,12 @@
         }
         break;
       }
+
+      case "contextPreview":
+        if (msg.text === contextPreviewText) {
+          renderContextPreview(msg.items || [], msg.error);
+        }
+        break;
 
       case "config":
         applyConfig(msg);

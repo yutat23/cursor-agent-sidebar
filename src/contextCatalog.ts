@@ -489,6 +489,53 @@ export async function readFolderContext(
   return blocks.join("\n\n");
 }
 
+export async function estimateFolderContext(
+  folderPath: string,
+  maxFiles = 20,
+  maxCharsPerFile = 8_000
+): Promise<{ files: number; chars: number }> {
+  try {
+    const stat = await fs.stat(folderPath);
+    if (!stat.isDirectory()) {
+      return { files: 0, chars: 0 };
+    }
+  } catch {
+    return { files: 0, chars: 0 };
+  }
+
+  const uris = await vscode.workspace.findFiles(
+    new vscode.RelativePattern(vscode.Uri.file(folderPath), "**/*"),
+    "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**}",
+    maxFiles * 3
+  );
+
+  let files = 0;
+  let chars = 0;
+  for (const uri of uris) {
+    if (files >= maxFiles) {
+      break;
+    }
+
+    const ext = nodePath.extname(uri.fsPath).toLowerCase();
+    if (!TEXT_FILE_EXTENSIONS.has(ext)) {
+      continue;
+    }
+
+    try {
+      const stat = await fs.stat(uri.fsPath);
+      if (!stat.isFile() || stat.size > maxCharsPerFile * 2) {
+        continue;
+      }
+      files++;
+      chars += Math.min(stat.size, maxCharsPerFile);
+    } catch {
+      continue;
+    }
+  }
+
+  return { files, chars };
+}
+
 export async function loadSlashContent(name: string, workspaceRoot: string): Promise<string | undefined> {
   const entries = await getSlashEntries(workspaceRoot);
   const entry = entries.find((item) => item.name.toLowerCase() === name.toLowerCase());

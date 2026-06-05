@@ -5,13 +5,14 @@ import * as vscode from "vscode";
 import { AcpClient, AgentMode } from "./acpClient";
 import { AcpSessionInfo, formatModelDisplayName, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
-import { buildPromptBlocks, PromptImageAttachment } from "./promptBuilder";
+import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
 import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
 import { FileEditCardData, parseToolUpdate } from "./toolCallParser";
 
 type WebviewMessage =
   | { type: "send"; text: string; images?: PromptImageAttachment[] }
   | { type: "requestSuggestions"; kind: "file" | "slash"; query: string }
+  | { type: "requestContextPreview"; text: string }
   | { type: "newChat" }
   | { type: "cancel" }
   | { type: "setMode"; modeId: AgentMode }
@@ -161,6 +162,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "requestSuggestions":
           await this.handleRequestSuggestions(msg.kind, msg.query);
+          break;
+        case "requestContextPreview":
+          await this.handleRequestContextPreview(msg.text);
           break;
         case "newChat":
           await this.handleNewChat();
@@ -956,6 +960,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private async handleRequestContextPreview(text: string): Promise<void> {
+    const root = this.workspaceRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    try {
+      const items = await getPromptContextPreview(text, root);
+      this.post({ type: "contextPreview", text, items });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "contextPreview", text, items: [], error: message });
+    }
+  }
+
   private async handleSend(text: string, images?: PromptImageAttachment[]): Promise<void> {
     const trimmed = text.trim();
     const sanitizedImages = sanitizeImageAttachments(images);
@@ -1084,6 +1099,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="modelMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
     <div id="suggestMenu" class="suggest-menu hidden" role="listbox"></div>
     <div class="composer-card">
+      <div id="contextTray" class="context-tray hidden" aria-label="添付コンテキスト"></div>
       <div id="attachmentTray" class="attachment-tray hidden" aria-label="添付画像"></div>
       <textarea id="input" rows="1" placeholder="Plan, @ for context, paste image, Enter to send"></textarea>
       <div class="composer-footer">
