@@ -13,6 +13,7 @@
   const modelMenu = document.getElementById("modelMenu");
   const suggestMenu = document.getElementById("suggestMenu");
   const newChatBtn = document.getElementById("newChat");
+  const usageBtn = document.getElementById("usageBtn");
   const changesBtn = document.getElementById("changesBtn");
   const changesMenu = document.getElementById("changesMenu");
   const permissionsBtn = document.getElementById("permissionsBtn");
@@ -1572,6 +1573,11 @@
   historyBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleMenu("history");
+  });
+
+  usageBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    vscode.postMessage({ type: "openUsageDashboard" });
   });
 
   changesBtn.addEventListener("click", (e) => {

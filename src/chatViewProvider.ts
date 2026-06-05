@@ -31,6 +31,7 @@ type WebviewMessage =
   | { type: "refreshSessions" }
   | { type: "retryConnect" }
   | { type: "openSettings" }
+  | { type: "openUsageDashboard" }
   | { type: "runDiagnostics" }
   | { type: "ready" };
 
@@ -264,6 +265,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "openSettings":
           await vscode.commands.executeCommand("workbench.action.openSettings", "cursorAgent.agentPath");
+          break;
+        case "openUsageDashboard":
+          await vscode.env.openExternal(vscode.Uri.parse("https://cursor.com/dashboard/spending"));
           break;
         case "runDiagnostics":
           await this.handleRunDiagnostics();
@@ -1321,6 +1325,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="pill-chevron">▾</span>
     </button>
     <div class="top-actions">
+      <button id="usageBtn" class="top-btn" type="button" title="Cursor 使用量ダッシュボードを開く">使用量</button>
       <button id="changesBtn" class="top-btn" type="button" title="変更レビュー">変更</button>
       <button id="permissionsBtn" class="top-btn" type="button" title="権限ルール">権限</button>
       <button id="newChat" class="top-btn" type="button" title="新しいチャット">+ New Chat</button>

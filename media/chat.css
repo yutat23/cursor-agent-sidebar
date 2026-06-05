@@ -1315,6 +1315,7 @@ body.vscode-high-contrast {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
+  min-width: 0;
 }
 
 .history-btn {
