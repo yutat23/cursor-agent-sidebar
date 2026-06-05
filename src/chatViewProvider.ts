@@ -4,11 +4,12 @@ import * as vscode from "vscode";
 import { AcpClient, AgentMode } from "./acpClient";
 import { AcpSessionInfo, formatModelDisplayName, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
-import { buildPromptText } from "./promptBuilder";
+import { buildPromptBlocks, PromptImageAttachment } from "./promptBuilder";
+import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
 import { FileEditCardData, parseToolUpdate } from "./toolCallParser";
 
 type WebviewMessage =
-  | { type: "send"; text: string }
+  | { type: "send"; text: string; images?: PromptImageAttachment[] }
   | { type: "requestSuggestions"; kind: "file" | "slash"; query: string }
   | { type: "newChat" }
   | { type: "cancel" }
@@ -33,6 +34,72 @@ const MODE_ICONS: Record<AgentMode, string> = {
   ask: "?",
 };
 
+const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_IMAGE_ATTACHMENTS = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+function sanitizeImageAttachments(images: PromptImageAttachment[] | undefined): PromptImageAttachment[] {
+  if (!images?.length) {
+    return [];
+  }
+
+  const sanitized: PromptImageAttachment[] = [];
+  for (const image of images.slice(0, MAX_IMAGE_ATTACHMENTS)) {
+    const mimeType = image.mimeType === "image/jpg" ? "image/jpeg" : image.mimeType;
+    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType) || typeof image.data !== "string") {
+      continue;
+    }
+
+    const data = image.data.replace(/\s/g, "");
+    if (!data) {
+      continue;
+    }
+
+    const bytes = Buffer.byteLength(data, "base64");
+    if (bytes <= 0 || bytes > MAX_IMAGE_BYTES) {
+      continue;
+    }
+
+    sanitized.push({ mimeType, data });
+  }
+
+  return sanitized;
+}
+
+function extractUpdateText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content.length > 0 ? content : undefined;
+  }
+  if (!content) {
+    return undefined;
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const block of content) {
+      const text = extractUpdateText(block);
+      if (text) {
+        parts.push(text);
+      }
+    }
+    return parts.length > 0 ? parts.join("") : undefined;
+  }
+  if (typeof content === "object" && "text" in content) {
+    const text = (content as { text?: unknown }).text;
+    if (typeof text === "string" && text.length > 0) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function isUserMessageUpdate(sessionUpdate: string | undefined): boolean {
+  return sessionUpdate === "user_message_chunk" || sessionUpdate === "user_message";
+}
+
+function isAgentMessageUpdate(sessionUpdate: string | undefined): boolean {
+  return sessionUpdate === "agent_message_chunk" || sessionUpdate === "agent_message";
+}
+
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private client?: AcpClient;
@@ -46,6 +113,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private fileEdits = new Map<string, FileEditCardData>();
   private workspaceRoot = "";
   private replayAssistantOpen = false;
+  private replayingSession = false;
+  private replayBuffer: Record<string, unknown>[] = [];
   private connectPromise?: Promise<void>;
   private connectEpoch = 0;
   private configSubscription?: vscode.Disposable;
@@ -78,7 +147,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.ensureClient();
           break;
         case "send":
-          await this.handleSend(msg.text);
+          await this.handleSend(msg.text, msg.images);
           break;
         case "requestSuggestions":
           await this.handleRequestSuggestions(msg.kind, msg.query);
@@ -306,17 +375,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.replayAssistantOpen = false;
       this.fileEdits.clear();
+      this.replayBuffer = [];
       this.post({ type: "clear" });
       this.post({ type: "sessionLoading", title: "チャットを読み込み中..." });
-      this.sessionConfig = await this.client.loadSession(sessionId);
+
+      this.replayingSession = true;
+      try {
+        this.sessionConfig = await this.client.loadSession(sessionId);
+      } finally {
+        this.replayingSession = false;
+      }
+
+      let hasHistory = this.replayBuffer.some(
+        (message) => message.type === "userMessage" || message.type === "assistantChunk"
+      );
+      this.flushReplayBuffer();
       this.finishReplayTurn();
+
+      if (!hasHistory) {
+        const localHistory = await loadSessionHistory(sessionId);
+        if (localHistory.length > 0) {
+          this.replayLocalHistory(localHistory);
+          hasHistory = true;
+        }
+      }
+
       this.mode = this.sessionConfig.currentModeId;
       this.modelId = this.sessionConfig.currentModelId;
       await this.savePreferences();
       this.postConfig();
-      this.post({ type: "sessionLoaded" });
+      this.post({ type: "sessionLoaded", emptyHistory: !hasHistory });
       await this.refreshSessions();
     } catch (err) {
+      this.replayingSession = false;
+      this.replayBuffer = [];
       const message = err instanceof Error ? err.message : String(err);
       this.post({ type: "error", text: `チャットの読み込みに失敗: ${message}` });
       this.post({ type: "sessionLoaded" });
@@ -330,6 +422,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.post({ type: "assistantDone", stopReason: "replay" });
     this.replayAssistantOpen = false;
+  }
+
+  private replayLocalHistory(messages: SessionHistoryMessage[]): void {
+    let assistantOpen = false;
+
+    for (const message of messages) {
+      if (message.role === "user") {
+        if (assistantOpen) {
+          this.post({ type: "assistantDone", stopReason: "replay" });
+          assistantOpen = false;
+        }
+        this.post({ type: "userMessage", text: message.text });
+        continue;
+      }
+
+      if (!assistantOpen) {
+        this.post({ type: "assistantStart" });
+        assistantOpen = true;
+      }
+      this.post({ type: "assistantChunk", text: message.text });
+    }
+
+    if (assistantOpen) {
+      this.post({ type: "assistantDone", stopReason: "replay" });
+    }
   }
 
   private async handleSetMode(modeId: AgentMode): Promise<void> {
@@ -507,20 +624,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private bindClientEvents(client: AcpClient): void {
     client.on("update", (update) => {
       const sessionUpdate = update.sessionUpdate as string | undefined;
-      const content = update.content as { text?: string } | undefined;
+      const text = extractUpdateText(update.content);
 
-      if (sessionUpdate === "user_message_chunk" && content?.text) {
+      if (isUserMessageUpdate(sessionUpdate) && text) {
         this.finishReplayTurn();
-        this.post({ type: "userMessage", text: content.text });
+        this.post({ type: "userMessage", text });
         return;
       }
 
-      if (sessionUpdate === "agent_message_chunk" && content?.text) {
+      if (isAgentMessageUpdate(sessionUpdate) && text) {
         if (!this.busy && !this.replayAssistantOpen) {
-          this.post({ type: "assistantStart" });
+          if (!this.replayingSession) {
+            this.post({ type: "assistantStart" });
+          }
           this.replayAssistantOpen = true;
         }
-        this.post({ type: "assistantChunk", text: content.text });
+        this.post({ type: "assistantChunk", text });
         return;
       }
 
@@ -529,8 +648,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
-      if (sessionUpdate === "agent_thought_chunk" && content?.text) {
-        this.post({ type: "thinking", text: content.text, append: true });
+      if (sessionUpdate === "agent_thought_chunk" && text) {
+        this.post({ type: "thinking", text, append: true });
       }
     });
 
@@ -735,9 +854,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async handleSend(text: string): Promise<void> {
+  private async handleSend(text: string, images?: PromptImageAttachment[]): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || this.busy) {
+    const sanitizedImages = sanitizeImageAttachments(images);
+    if ((!trimmed && sanitizedImages.length === 0) || this.busy) {
       return;
     }
 
@@ -748,18 +868,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const root = this.workspaceRoot || process.cwd();
-    const promptText = await buildPromptText(trimmed, root);
+    const promptBlocks = await buildPromptBlocks(trimmed, root, sanitizedImages);
 
     this.busy = true;
     this.stopping = false;
     this.setRunningContext(true);
-    this.post({ type: "userMessage", text: trimmed });
+    this.post({ type: "userMessage", text: trimmed, images: sanitizedImages });
     this.post({ type: "assistantStart" });
     this.post({ type: "running", running: true, stopping: false });
     this.postConfig();
 
     try {
-      const result = await this.client!.prompt(promptText);
+      const result = await this.client!.prompt(promptBlocks);
 
       if (this.stopping || result.stopReason === "cancelled" || result.stopReason === "canceled") {
         this.finishCancel();
@@ -797,7 +917,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private post(message: Record<string, unknown>): void {
+    if (this.replayingSession) {
+      this.replayBuffer.push(message);
+      return;
+    }
     void this.view?.webview.postMessage(message);
+  }
+
+  private flushReplayBuffer(): void {
+    for (const message of this.replayBuffer) {
+      void this.view?.webview.postMessage(message);
+    }
+    this.replayBuffer = [];
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -809,7 +940,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: blob:;" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${styleUri}" />
   <title>Cursor Agent</title>
@@ -843,7 +974,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="modelMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
     <div id="suggestMenu" class="suggest-menu hidden" role="listbox"></div>
     <div class="composer-card">
-      <textarea id="input" rows="1" placeholder="Plan, @ for context, Enter to send"></textarea>
+      <div id="attachmentTray" class="attachment-tray hidden" aria-label="添付画像"></div>
+      <textarea id="input" rows="1" placeholder="Plan, @ for context, paste image, Enter to send"></textarea>
       <div class="composer-footer">
         <div class="composer-meta">
           <button id="modePill" class="pill" type="button" title="モード">

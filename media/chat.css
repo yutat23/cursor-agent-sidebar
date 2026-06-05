@@ -56,8 +56,17 @@ body {
   padding-right: 4px;
 }
 
-.turn-user .user-text {
+.turn-user .user-message-body {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
   max-width: 90%;
+}
+
+.turn-user .user-text {
+  width: fit-content;
+  max-width: 100%;
   padding: 10px 14px;
   font-size: 13.5px;
   line-height: 1.6;
@@ -69,6 +78,23 @@ body {
   color: var(--vscode-button-foreground, #fff);
   border: 1px solid color-mix(in srgb, var(--vscode-button-background, #0078d4) 80%, #000);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+}
+
+.user-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.user-image {
+  display: block;
+  max-width: min(100%, 280px);
+  max-height: 220px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--vscode-button-background, #0078d4) 70%, #000);
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.12);
 }
 
 .turn-assistant {
@@ -113,6 +139,109 @@ body {
 .assistant-text strong {
   font-weight: 600;
   color: var(--vscode-foreground);
+}
+
+.assistant-text.rendered > :first-child {
+  margin-top: 0;
+}
+
+.assistant-text.rendered > :last-child {
+  margin-bottom: 0;
+}
+
+.assistant-text .md-heading {
+  margin: 16px 0 8px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--vscode-foreground);
+}
+
+.assistant-text .md-h1 {
+  font-size: 1.35em;
+}
+
+.assistant-text .md-h2 {
+  font-size: 1.2em;
+}
+
+.assistant-text .md-h3 {
+  font-size: 1.08em;
+}
+
+.assistant-text .md-h4,
+.assistant-text .md-h5,
+.assistant-text .md-h6 {
+  font-size: 1em;
+}
+
+.assistant-text .md-paragraph {
+  margin: 0 0 10px;
+}
+
+.assistant-text .md-list {
+  margin: 0 0 12px;
+  padding-left: 1.4em;
+}
+
+.assistant-text .md-list li {
+  margin: 4px 0;
+}
+
+.assistant-text .md-list li::marker {
+  color: var(--vscode-descriptionForeground);
+}
+
+.assistant-text .md-table-wrap {
+  overflow-x: auto;
+  margin: 10px 0 14px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+}
+
+.assistant-text .md-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.assistant-text .md-table th,
+.assistant-text .md-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.assistant-text .md-table th {
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+  font-weight: 600;
+}
+
+.assistant-text .md-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.assistant-text .md-hr {
+  border: none;
+  border-top: 1px solid var(--vscode-panel-border);
+  margin: 14px 0;
+}
+
+.assistant-text .md-quote {
+  margin: 10px 0;
+  padding: 8px 12px;
+  border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border));
+  background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
+  color: var(--vscode-foreground);
+}
+
+.assistant-text .md-link {
+  color: var(--vscode-textLink-foreground, #3794ff);
+  text-decoration: underline;
+}
+
+.assistant-text .md-link:hover {
+  color: var(--vscode-textLink-activeForeground, #3794ff);
 }
 
 .code-block {
@@ -582,6 +711,62 @@ body {
 
 .composer-card:focus-within {
   border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
+}
+
+.attachment-tray {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 10px 0;
+}
+
+.attachment-tray.hidden {
+  display: none;
+}
+
+.attachment-error {
+  width: 100%;
+  font-size: 12px;
+  color: var(--vscode-errorForeground, #f48771);
+}
+
+.attachment-chip {
+  position: relative;
+  width: 72px;
+  height: 72px;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+}
+
+.attachment-chip img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.attachment-remove {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 20px;
+  height: 20px;
+  border: none;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  color: #fff;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.attachment-remove:hover {
+  background: rgba(0, 0, 0, 0.8);
 }
 
 .composer-card textarea {

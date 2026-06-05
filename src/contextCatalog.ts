@@ -74,6 +74,46 @@ function rankMatch(rel: string, query: string): number {
   return 3;
 }
 
+function pathDepth(label: string): number {
+  return label.replace(/\/$/, "").split("/").length - 1;
+}
+
+function maxWalkDepth(query: string): number {
+  return query ? 8 : 2;
+}
+
+function shouldRecurseIntoDir(
+  query: string,
+  rel: string,
+  entryName: string,
+  depth: number
+): boolean {
+  if (depth >= maxWalkDepth(query)) {
+    return false;
+  }
+  if (!query) {
+    return true;
+  }
+  const lastSegment = query.split("/").pop() ?? query;
+  return (
+    rel.toLowerCase().includes(query) ||
+    entryName.toLowerCase().includes(lastSegment) ||
+    query.startsWith(`${rel}/`)
+  );
+}
+
+function compareSuggestItems(a: SuggestItem, b: SuggestItem, query: string): number {
+  const rankDiff = rankMatch(a.label, query) - rankMatch(b.label, query);
+  if (rankDiff !== 0) {
+    return rankDiff;
+  }
+  const depthDiff = pathDepth(a.label) - pathDepth(b.label);
+  if (depthDiff !== 0) {
+    return depthDiff;
+  }
+  return a.label.localeCompare(b.label);
+}
+
 async function collectFolderItems(
   workspaceRoot: string,
   query: string,
@@ -83,7 +123,7 @@ async function collectFolderItems(
   const seen = new Set<string>();
 
   async function walk(absDir: string, relDir: string, depth: number): Promise<void> {
-    if (items.length >= limit || depth > 8) {
+    if (items.length >= limit || depth > maxWalkDepth(query)) {
       return;
     }
 
@@ -120,14 +160,65 @@ async function collectFolderItems(
         }
       }
 
-      const lastSegment = query.split("/").pop() ?? query;
-      const shouldRecurse =
-        !query ||
-        rel.toLowerCase().includes(query) ||
-        entry.name.toLowerCase().includes(lastSegment) ||
-        query.startsWith(`${rel}/`);
+      if (shouldRecurseIntoDir(query, rel, entry.name, depth)) {
+        await walk(nodePath.join(absDir, entry.name), rel, depth + 1);
+      }
+    }
+  }
 
-      if (shouldRecurse) {
+  await walk(workspaceRoot, "", 0);
+  return items;
+}
+
+async function collectFileItems(
+  workspaceRoot: string,
+  query: string,
+  limit: number
+): Promise<SuggestItem[]> {
+  const items: SuggestItem[] = [];
+  const seen = new Set<string>();
+
+  async function walk(absDir: string, relDir: string, depth: number): Promise<void> {
+    if (items.length >= limit || depth > maxWalkDepth(query)) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (shouldIgnoreRelativePath(rel)) {
+        continue;
+      }
+
+      if (entry.isFile()) {
+        if (!query || matchesQuery(rel, query)) {
+          if (!seen.has(rel)) {
+            seen.add(rel);
+            items.push({
+              id: `file:${rel}`,
+              label: rel,
+              detail: nodePath.basename(rel),
+              insertText: rel,
+              kind: "file",
+            });
+          }
+        }
+        continue;
+      }
+
+      if (!entry.isDirectory() || IGNORE_DIRS.has(entry.name)) {
+        continue;
+      }
+
+      if (shouldRecurseIntoDir(query, rel, entry.name, depth)) {
         await walk(nodePath.join(absDir, entry.name), rel, depth + 1);
       }
     }
@@ -304,37 +395,18 @@ export async function searchFileItems(query: string, workspaceRoot: string): Pro
     return [];
   }
 
-  const pattern =
-    q.length > 0
-      ? `**/*${q.split("/").pop() ?? q}*`
-      : "**/*";
-
-  const [uris, folderItems] = await Promise.all([
-    vscode.workspace.findFiles(
-      pattern,
-      "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}",
-      80
-    ),
+  const [folderItems, fileItems] = await Promise.all([
     collectFolderItems(workspaceRoot, q, 30),
+    collectFileItems(workspaceRoot, q, 80),
   ]);
 
   const folderPaths = new Set<string>();
-  const fileItems: SuggestItem[] = [];
-
   for (const item of folderItems) {
     folderPaths.add(item.insertText.replace(/\/$/, ""));
   }
 
-  for (const uri of uris) {
-    const fullPath = uri.fsPath;
-    const rel = nodePath.relative(workspaceRoot, fullPath).replace(/\\/g, "/");
-    if (!rel || rel.startsWith("..") || shouldIgnoreRelativePath(rel)) {
-      continue;
-    }
-    if (q && !matchesQuery(rel, q)) {
-      continue;
-    }
-
+  for (const item of fileItems) {
+    const rel = item.insertText;
     const parts = rel.split("/");
     for (let i = 1; i < parts.length; i++) {
       const dir = parts.slice(0, i).join("/");
@@ -349,28 +421,11 @@ export async function searchFileItems(query: string, workspaceRoot: string): Pro
         });
       }
     }
-
-    fileItems.push({
-      id: `file:${rel}`,
-      label: rel,
-      detail: nodePath.basename(rel),
-      insertText: rel,
-      kind: "file",
-    });
   }
 
   const folders = [...new Map(folderItems.map((item) => [item.insertText, item])).values()];
   const merged = [...folders, ...fileItems];
-  merged.sort((a, b) => {
-    const rankDiff = rankMatch(a.label, q) - rankMatch(b.label, q);
-    if (rankDiff !== 0) {
-      return rankDiff;
-    }
-    if (a.kind !== b.kind) {
-      return a.kind === "folder" ? -1 : 1;
-    }
-    return a.label.localeCompare(b.label);
-  });
+  merged.sort((a, b) => compareSuggestItems(a, b, q));
 
   return merged.slice(0, 20);
 }

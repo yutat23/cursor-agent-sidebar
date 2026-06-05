@@ -1,6 +1,12 @@
 import * as fs from "node:fs/promises";
 import * as nodePath from "node:path";
+import { PromptContentBlock } from "./acpClient";
 import { loadSlashContent, readFolderContext } from "./contextCatalog";
+
+export interface PromptImageAttachment {
+  mimeType: string;
+  data: string;
+}
 
 const AT_REF = /@([^\s@]+)/g;
 const SLASH_PREFIX = /^\/([\w-]+)(?:\s+([\s\S]*))?$/;
@@ -85,4 +91,23 @@ export async function buildPromptText(rawText: string, workspaceRoot: string): P
   }
 
   return sections.join("\n\n");
+}
+
+export async function buildPromptBlocks(
+  rawText: string,
+  workspaceRoot: string,
+  images: PromptImageAttachment[] = []
+): Promise<PromptContentBlock[]> {
+  const trimmed = rawText.trim();
+  const blocks: PromptContentBlock[] = [];
+
+  if (trimmed) {
+    blocks.push({ type: "text", text: await buildPromptText(trimmed, workspaceRoot) });
+  }
+
+  for (const image of images) {
+    blocks.push({ type: "image", mimeType: image.mimeType, data: image.data });
+  }
+
+  return blocks;
 }
