@@ -16,6 +16,8 @@ export interface FileEditCardData {
   status: string;
   previewLines: DiffPreviewLine[];
   line?: number;
+  previousText?: string | null;
+  nextText?: string;
 }
 
 export interface ParsedToolUpdate {
@@ -263,6 +265,8 @@ export function parseToolUpdate(update: Record<string, unknown>): ParsedToolUpda
       status,
       previewLines: preview.previewLines,
       line: locations?.[0]?.line,
+      previousText: oldText,
+      nextText: newText,
     },
     activityTitle: title ?? path.basename(filePath),
   };

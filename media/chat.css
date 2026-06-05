@@ -1219,6 +1219,11 @@ body {
   background: var(--vscode-list-hoverBackground);
 }
 
+.top-btn.has-items {
+  color: var(--vscode-textLink-foreground, #3794ff);
+  opacity: 1;
+}
+
 .top-actions {
   display: flex;
   align-items: center;
@@ -1255,6 +1260,10 @@ body {
 }
 
 .permission-menu {
+  gap: 6px;
+}
+
+.changes-menu {
   gap: 6px;
 }
 
@@ -1354,6 +1363,75 @@ body {
   height: 20px;
   font-size: 14px;
   line-height: 1;
+}
+
+.changes-list {
+  max-height: 260px;
+}
+
+.change-review-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px;
+  border-radius: 6px;
+}
+
+.change-review-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.change-review-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  padding: 0;
+}
+
+.change-review-name {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-review-detail {
+  font-size: 11px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.change-review-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.change-review-action {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 5px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 3px 6px;
+}
+
+.change-review-action:hover:not(:disabled) {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.change-review-action:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .boot-overlay {

@@ -13,6 +13,8 @@
   const modelMenu = document.getElementById("modelMenu");
   const suggestMenu = document.getElementById("suggestMenu");
   const newChatBtn = document.getElementById("newChat");
+  const changesBtn = document.getElementById("changesBtn");
+  const changesMenu = document.getElementById("changesMenu");
   const permissionsBtn = document.getElementById("permissionsBtn");
   const permissionsMenu = document.getElementById("permissionsMenu");
   const historyBtn = document.getElementById("historyBtn");
@@ -57,6 +59,7 @@
   let autoApproveEnabled = false;
   let sessions = [];
   let currentSessionId = null;
+  let changeReviewItems = [];
   let permissionRules = [];
   let permissionHistory = [];
   let openMenu = null;
@@ -243,6 +246,7 @@
     modeMenu.classList.add("hidden");
     modelMenu.classList.add("hidden");
     historyMenu.classList.add("hidden");
+    changesMenu.classList.add("hidden");
     permissionsMenu.classList.add("hidden");
     openMenu = null;
   }
@@ -595,6 +599,53 @@
     permissionsMenu.appendChild(historyList);
   }
 
+  function renderChangesMenu() {
+    changesMenu.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "permission-menu-title permission-menu-title-inline";
+    title.innerHTML = '<span>変更レビュー</span><button class="permission-clear" type="button">消去</button>';
+    title.querySelector(".permission-clear").addEventListener("click", () => {
+      vscode.postMessage({ type: "clearChangeReview" });
+    });
+    changesMenu.appendChild(title);
+
+    const list = document.createElement("div");
+    list.className = "picker-list changes-list";
+    if (!changeReviewItems.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "まだ変更はありません";
+      list.appendChild(empty);
+    } else {
+      for (const item of changeReviewItems) {
+        const row = document.createElement("div");
+        row.className = "change-review-row";
+        row.innerHTML = `
+          <button class="change-review-main" type="button" title="差分を開く">
+            <span class="change-review-name">${escapeHtml(item.fileName || item.path)}</span>
+            <span class="change-review-detail">${formatEditStats(item.addedLines || 0, item.removedLines || 0)} · ${escapeHtml(item.status || "updated")}</span>
+          </button>
+          <span class="change-review-actions">
+            <button class="change-review-action" type="button" data-action="open">開く</button>
+            <button class="change-review-action" type="button" data-action="revert" ${item.canRevert ? "" : "disabled"}>戻す</button>
+          </span>
+        `;
+        row.querySelector(".change-review-main").addEventListener("click", () => {
+          vscode.postMessage({ type: "openDiff", path: item.path });
+        });
+        row.querySelector('[data-action="open"]').addEventListener("click", () => {
+          vscode.postMessage({ type: "openFile", path: item.path });
+        });
+        row.querySelector('[data-action="revert"]').addEventListener("click", () => {
+          vscode.postMessage({ type: "revertFile", path: item.path });
+        });
+        list.appendChild(row);
+      }
+    }
+    changesMenu.appendChild(list);
+  }
+
   function renderModeMenu() {
     if (!sessionConfig?.modes?.length) {
       modeMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
@@ -716,6 +767,11 @@
       renderHistoryMenu();
       historyMenu.classList.remove("hidden");
       positionMenu(historyMenu, historyBtn, "below");
+    } else if (menuName === "changes") {
+      vscode.postMessage({ type: "requestChangeReview" });
+      renderChangesMenu();
+      changesMenu.classList.remove("hidden");
+      positionMenu(changesMenu, changesBtn, "below");
     } else if (menuName === "permissions") {
       vscode.postMessage({ type: "requestPermissionState" });
       renderPermissionMenu();
@@ -1433,6 +1489,11 @@
     toggleMenu("history");
   });
 
+  changesBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleMenu("changes");
+  });
+
   permissionsBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleMenu("permissions");
@@ -1469,6 +1530,7 @@
   modeMenu.addEventListener("click", (e) => e.stopPropagation());
   modelMenu.addEventListener("click", (e) => e.stopPropagation());
   historyMenu.addEventListener("click", (e) => e.stopPropagation());
+  changesMenu.addEventListener("click", (e) => e.stopPropagation());
   permissionsMenu.addEventListener("click", (e) => e.stopPropagation());
 
   suggestMenu.addEventListener("mousedown", (e) => e.stopPropagation());
@@ -1573,6 +1635,14 @@
         upsertFileEditCard(msg);
         break;
 
+      case "changeReview":
+        changeReviewItems = msg.items || [];
+        changesBtn.classList.toggle("has-items", changeReviewItems.length > 0);
+        if (openMenu === "changes") {
+          renderChangesMenu();
+        }
+        break;
+
       case "cancelled": {
         dismissPermissionCards();
         finalizeToolPanel();
@@ -1639,6 +1709,15 @@
         }
         scrollToBottom();
         break;
+
+      case "system": {
+        const note = document.createElement("div");
+        note.className = "system-note";
+        note.innerHTML = `<span class="system-note-text">${escapeHtml(msg.text || "")}</span>`;
+        threadEl.appendChild(note);
+        scrollToBottom();
+        break;
+      }
 
       case "settings":
         if (typeof msg.autoApprovePermissions === "boolean") {

@@ -22,6 +22,10 @@ type WebviewMessage =
   | { type: "removePermissionRule"; id: string }
   | { type: "clearPermissionHistory" }
   | { type: "openFile"; path: string; line?: number }
+  | { type: "openDiff"; path: string }
+  | { type: "revertFile"; path: string }
+  | { type: "requestChangeReview" }
+  | { type: "clearChangeReview" }
   | { type: "selectSession"; sessionId: string }
   | { type: "setAutoApprove"; enabled: boolean }
   | { type: "refreshSessions" }
@@ -58,6 +62,18 @@ interface PermissionHistoryItem {
   decision: string;
   autoApproved: boolean;
   createdAt: string;
+}
+
+interface ChangeReviewItem {
+  path: string;
+  fileName: string;
+  status: string;
+  addedLines: number;
+  removedLines: number;
+  previewLines: FileEditCardData["previewLines"];
+  previousText?: string | null;
+  canRevert: boolean;
+  updatedAt: string;
 }
 
 const MODE_ICONS: Record<AgentMode, string> = {
@@ -149,6 +165,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
   private fileEdits = new Map<string, FileEditCardData>();
+  private changeReviewItems = new Map<string, ChangeReviewItem>();
   private workspaceRoot = "";
   private replayAssistantOpen = false;
   private replayingSession = false;
@@ -219,6 +236,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "openFile":
           await this.openFile(msg.path, msg.line);
+          break;
+        case "openDiff":
+          await this.openDiff(msg.path);
+          break;
+        case "revertFile":
+          await this.revertFile(msg.path);
+          break;
+        case "requestChangeReview":
+          this.postChangeReview();
+          break;
+        case "clearChangeReview":
+          this.changeReviewItems.clear();
+          this.postChangeReview();
           break;
         case "selectSession":
           await this.handleSelectSession(msg.sessionId);
@@ -517,8 +547,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.replayAssistantOpen = false;
       this.fileEdits.clear();
+      this.changeReviewItems.clear();
       this.replayBuffer = [];
       this.post({ type: "clear" });
+      this.postChangeReview();
       this.post({ type: "sessionLoading", title: "チャットを読み込み中..." });
 
       this.replayingSession = true;
@@ -659,7 +691,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       this.fileEdits.set(merged.id, merged);
-      this.post({ type: "fileEdit", ...merged });
+      this.upsertChangeReviewItem(merged);
+      const { previousText: _previousText, nextText: _nextText, ...publicFileEdit } = merged;
+      this.post({ type: "fileEdit", ...publicFileEdit });
       return;
     }
 
@@ -694,6 +728,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private upsertChangeReviewItem(fileEdit: FileEditCardData): void {
+    const existing = this.changeReviewItems.get(fileEdit.path);
+    const next: ChangeReviewItem = {
+      ...(existing ?? {
+        path: fileEdit.path,
+        fileName: fileEdit.fileName,
+        previousText: fileEdit.previousText,
+      }),
+      path: fileEdit.path,
+      fileName: fileEdit.fileName,
+      status: fileEdit.status,
+      addedLines: fileEdit.addedLines || existing?.addedLines || 0,
+      removedLines: fileEdit.removedLines || existing?.removedLines || 0,
+      previewLines: fileEdit.previewLines.length > 0 ? fileEdit.previewLines : (existing?.previewLines ?? []),
+      previousText:
+        existing?.previousText !== undefined ? existing.previousText : fileEdit.previousText,
+      canRevert: (existing?.previousText !== undefined ? existing.previousText : fileEdit.previousText) !== undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    this.changeReviewItems.set(fileEdit.path, next);
+    this.postChangeReview();
+  }
+
+  private postChangeReview(): void {
+    const items = [...this.changeReviewItems.values()].sort(
+      (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+    ).map(({ previousText: _previousText, ...item }) => item);
+    this.post({ type: "changeReview", items });
+  }
+
   private async openFile(filePath: string, line = 1): Promise<void> {
     const resolved = this.resolvePath(filePath);
     try {
@@ -708,6 +772,58 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.post({ type: "error", text: `ファイルを開けませんでした: ${message}` });
+    }
+  }
+
+  private async openDiff(filePath: string): Promise<void> {
+    const resolved = this.resolvePath(filePath);
+    const item = this.changeReviewItems.get(resolved);
+    if (!item || item.previousText === undefined) {
+      await this.openFile(resolved);
+      return;
+    }
+
+    try {
+      const storageUri =
+        this.extensionContext.globalStorageUri ??
+        vscode.Uri.file(nodePath.join(this.extensionContext.globalStoragePath, "review"));
+      const baselineDir = vscode.Uri.joinPath(storageUri, "review-baselines");
+      await fs.mkdir(baselineDir.fsPath, { recursive: true });
+      const safeName = Buffer.from(resolved).toString("base64url");
+      const baselineUri = vscode.Uri.joinPath(baselineDir, `${safeName}-${nodePath.basename(resolved)}`);
+      await fs.writeFile(baselineUri.fsPath, item.previousText ?? "", "utf8");
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        baselineUri,
+        vscode.Uri.file(resolved),
+        `${item.fileName}: before ↔ current`
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: `差分を開けませんでした: ${message}` });
+    }
+  }
+
+  private async revertFile(filePath: string): Promise<void> {
+    const resolved = this.resolvePath(filePath);
+    const item = this.changeReviewItems.get(resolved);
+    if (!item || item.previousText === undefined) {
+      this.post({ type: "error", text: "この変更は元内容がないため revert できません" });
+      return;
+    }
+
+    try {
+      if (item.previousText === null) {
+        await fs.rm(resolved, { force: true });
+      } else {
+        await fs.writeFile(resolved, item.previousText, "utf8");
+      }
+      this.changeReviewItems.delete(resolved);
+      this.postChangeReview();
+      this.post({ type: "system", text: `${item.fileName} を元に戻しました` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: `revert に失敗しました: ${message}` });
     }
   }
 
@@ -1041,11 +1157,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionConfig = undefined;
     this.permissionRequests.clear();
     this.fileEdits.clear();
+    this.changeReviewItems.clear();
     this.busy = false;
     this.stopping = false;
     this.setRunningContext(false);
     this.replayAssistantOpen = false;
     this.post({ type: "clear" });
+    this.postChangeReview();
     this.post({ type: "init", status: "loading", message: "新しいチャットを準備中..." });
 
     const epoch = this.connectEpoch;
@@ -1203,11 +1321,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="pill-chevron">▾</span>
     </button>
     <div class="top-actions">
+      <button id="changesBtn" class="top-btn" type="button" title="変更レビュー">変更</button>
       <button id="permissionsBtn" class="top-btn" type="button" title="権限ルール">権限</button>
       <button id="newChat" class="top-btn" type="button" title="新しいチャット">+ New Chat</button>
     </div>
   </div>
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
+  <div id="changesMenu" class="picker-menu picker-menu-wide changes-menu hidden" role="menu"></div>
   <div id="permissionsMenu" class="picker-menu picker-menu-wide permission-menu hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">
     <div class="boot-card">
