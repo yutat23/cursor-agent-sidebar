@@ -1,0 +1,105 @@
+{
+  "name": "cursor-agent-sidebar",
+  "displayName": "Cursor Agent Sidebar",
+  "description": "Secondary Side Bar で Cursor CLI agent とチャットする拡張機能",
+  "version": "0.1.0",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:cursorAgent.chat"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        {
+          "id": "cursorAgent",
+          "title": "Cursor Agent",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "cursorAgent": [
+        {
+          "type": "webview",
+          "id": "cursorAgent.chat",
+          "name": "Chat"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "cursorAgent.newChat",
+        "title": "Cursor Agent: New Chat",
+        "icon": "$(add)"
+      },
+      {
+        "command": "cursorAgent.focus",
+        "title": "Cursor Agent: Focus Chat"
+      },
+      {
+        "command": "cursorAgent.stop",
+        "title": "Cursor Agent: Stop Agent",
+        "icon": "$(debug-stop)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "cursorAgent.stop",
+        "key": "escape",
+        "when": "cursorAgent.running"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "cursorAgent.stop",
+          "when": "view == cursorAgent.chat && cursorAgent.running",
+          "group": "navigation"
+        },
+        {
+          "command": "cursorAgent.newChat",
+          "when": "view == cursorAgent.chat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Cursor Agent",
+      "properties": {
+        "cursorAgent.agentPath": {
+          "type": "string",
+          "default": "agent",
+          "description": "Cursor CLI agent コマンドのパス（PATH 上の agent またはフルパス）"
+        },
+        "cursorAgent.model": {
+          "type": "string",
+          "default": "",
+          "description": "使用するモデル（空の場合はデフォルト）"
+        },
+        "cursorAgent.autoApprovePermissions": {
+          "type": "boolean",
+          "default": false,
+          "description": "ツール実行の許可を自動的に承認する（--yolo 相当）"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.96.0",
+    "typescript": "^5.7.0"
+  }
+}
