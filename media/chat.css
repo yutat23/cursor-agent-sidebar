@@ -13,7 +13,7 @@ body {
   flex-direction: column;
   height: 100vh;
   --chat-code-foreground: #334155;
-  --chat-code-keyword: #7c3aed;
+  --chat-code-keyword: #6d28d9;
   --chat-code-string: #047857;
   --chat-code-comment: #64748b;
   --chat-code-number: #b45309;
@@ -279,7 +279,7 @@ body.vscode-high-contrast {
   position: relative;
   margin: 7px 0;
   padding: 9px 11px;
-  background: color-mix(in srgb, var(--vscode-editor-background) 92%, #000);
+  background: color-mix(in srgb, var(--vscode-editor-background) 97%, #000);
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
@@ -288,6 +288,11 @@ body.vscode-high-contrast {
   color: var(--chat-code-foreground);
   overflow-x: auto;
   white-space: pre;
+}
+
+.code-block code,
+.code-block span {
+  background: transparent !important;
 }
 
 .code-block[data-lang] {
