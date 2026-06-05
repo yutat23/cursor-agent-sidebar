@@ -868,6 +868,82 @@
     return html;
   }
 
+  function normalizeCodeLanguage(raw) {
+    const lang = (raw || "").trim().toLowerCase();
+    const aliases = {
+      javascript: "js",
+      typescript: "ts",
+      jsx: "jsx",
+      tsx: "tsx",
+      jsonc: "json",
+      shell: "sh",
+      bash: "sh",
+      zsh: "sh",
+      markdown: "md",
+    };
+    return aliases[lang] || lang;
+  }
+
+  function highlightCode(code, rawLanguage) {
+    const language = normalizeCodeLanguage(rawLanguage);
+    const placeholders = [];
+    let html = escapeHtml(code);
+
+    function placeholderKey(index) {
+      let value = "";
+      let current = index;
+      do {
+        value = String.fromCharCode(65 + (current % 26)) + value;
+        current = Math.floor(current / 26) - 1;
+      } while (current >= 0);
+      return `@@HL_${value}@@`;
+    }
+
+    function stash(className, value) {
+      const token = placeholderKey(placeholders.length);
+      placeholders.push(`<span class="${className}">${value}</span>`);
+      return token;
+    }
+
+    html = html.replace(/(&quot;(?:\\.|[^&])*?&quot;|'(?:\\.|[^'])*?'|`(?:\\.|[^`])*?`)/g, (match) =>
+      stash("tok-string", match)
+    );
+
+    if (["js", "jsx", "ts", "tsx", "css", "scss"].includes(language)) {
+      html = html.replace(/(\/\*[\s\S]*?\*\/)/g, (match) => stash("tok-comment", match));
+    }
+    if (["js", "jsx", "ts", "tsx"].includes(language)) {
+      html = html.replace(/(\/\/[^\n]*)/g, (match) => stash("tok-comment", match));
+    }
+    if (["sh", "bash"].includes(language)) {
+      html = html.replace(/(#[^\n]*)/g, (match) => stash("tok-comment", match));
+    }
+
+    if (["js", "jsx", "ts", "tsx"].includes(language)) {
+      html = html.replace(
+        /\b(import|export|from|const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|extends|new|async|await|try|catch|finally|throw|type|interface|enum|implements|public|private|protected|readonly|static|of|in|as)\b/g,
+        '<span class="tok-keyword">$1</span>'
+      );
+      html = html.replace(/\b(true|false|null|undefined|this|super)\b/g, '<span class="tok-literal">$1</span>');
+    } else if (language === "json") {
+      html = html.replace(/(&quot;[^&]+&quot;)(\s*:)/g, '<span class="tok-property">$1</span>$2');
+      html = html.replace(/\b(true|false|null)\b/g, '<span class="tok-literal">$1</span>');
+    } else if (["css", "scss"].includes(language)) {
+      html = html.replace(/([.#]?[a-zA-Z_-][\w-]*)(\s*\{)/g, '<span class="tok-selector">$1</span>$2');
+      html = html.replace(/([a-zA-Z-]+)(\s*:)/g, '<span class="tok-property">$1</span>$2');
+    } else if (["sh", "bash"].includes(language)) {
+      html = html.replace(/\b(if|then|else|fi|for|do|done|case|esac|while|function|export|local|return|set)\b/g, '<span class="tok-keyword">$1</span>');
+    }
+
+    html = html.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
+
+    placeholders.forEach((value, index) => {
+      html = html.replace(placeholderKey(index), value);
+    });
+
+    return html;
+  }
+
   function isTableSeparator(line) {
     return /^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/.test(line);
   }
@@ -919,13 +995,16 @@
       const line = lines[i];
 
       if (line.trim().startsWith("```")) {
+        const fence = line.trim().match(/^```(\S*)/);
+        const language = normalizeCodeLanguage(fence?.[1] || "");
         const chunks = [];
         i += 1;
         while (i < lines.length && !lines[i].trim().startsWith("```")) {
           chunks.push(lines[i]);
           i += 1;
         }
-        out.push(`<pre class="code-block"><code>${escapeHtml(chunks.join("\n"))}</code></pre>`);
+        const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
+        out.push(`<pre class="code-block"${langAttr}><code>${highlightCode(chunks.join("\n"), language)}</code></pre>`);
         i += 1;
         continue;
       }

@@ -22,20 +22,20 @@ body {
 .thread {
   flex: 1;
   overflow-y: auto;
-  padding: 12px 12px 8px;
+  padding: 8px 10px 6px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
 }
 
 .turn {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
 }
 
 .turn + .turn {
-  padding-top: 4px;
+  padding-top: 2px;
   border-top: 1px solid var(--vscode-panel-border);
 }
 
@@ -60,16 +60,16 @@ body {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
   max-width: 90%;
 }
 
 .turn-user .user-text {
   width: fit-content;
   max-width: 100%;
-  padding: 10px 14px;
-  font-size: 13.5px;
-  line-height: 1.6;
+  padding: 7px 10px;
+  font-size: 12.5px;
+  line-height: 1.45;
   font-weight: 500;
   white-space: pre-wrap;
   word-break: break-word;
@@ -98,14 +98,14 @@ body {
 }
 
 .turn-assistant {
-  gap: 6px;
+  gap: 4px;
   align-items: stretch;
 }
 
 .activity-panel {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   width: 100%;
 }
 
@@ -115,14 +115,14 @@ body {
 }
 
 .assistant-text {
-  font-size: 13.5px;
-  line-height: 1.7;
+  font-size: 12.75px;
+  line-height: 1.52;
   word-break: break-word;
   color: var(--vscode-foreground);
   background: var(--vscode-editor-background);
   border: 1px solid var(--vscode-panel-border);
   border-radius: 8px;
-  padding: 12px 14px;
+  padding: 9px 11px;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
 }
 
@@ -150,18 +150,18 @@ body {
 }
 
 .assistant-text .md-heading {
-  margin: 16px 0 8px;
+  margin: 12px 0 6px;
   font-weight: 600;
-  line-height: 1.35;
+  line-height: 1.28;
   color: var(--vscode-foreground);
 }
 
 .assistant-text .md-h1 {
-  font-size: 1.35em;
+  font-size: 1.2em;
 }
 
 .assistant-text .md-h2 {
-  font-size: 1.2em;
+  font-size: 1.12em;
 }
 
 .assistant-text .md-h3 {
@@ -175,16 +175,16 @@ body {
 }
 
 .assistant-text .md-paragraph {
-  margin: 0 0 10px;
+  margin: 0 0 7px;
 }
 
 .assistant-text .md-list {
-  margin: 0 0 12px;
-  padding-left: 1.4em;
+  margin: 0 0 8px;
+  padding-left: 1.25em;
 }
 
 .assistant-text .md-list li {
-  margin: 4px 0;
+  margin: 2px 0;
 }
 
 .assistant-text .md-list li::marker {
@@ -193,7 +193,7 @@ body {
 
 .assistant-text .md-table-wrap {
   overflow-x: auto;
-  margin: 10px 0 14px;
+  margin: 7px 0 10px;
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
 }
@@ -201,12 +201,12 @@ body {
 .assistant-text .md-table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .assistant-text .md-table th,
 .assistant-text .md-table td {
-  padding: 8px 10px;
+  padding: 5px 7px;
   border-bottom: 1px solid var(--vscode-panel-border);
   text-align: left;
   vertical-align: top;
@@ -224,12 +224,12 @@ body {
 .assistant-text .md-hr {
   border: none;
   border-top: 1px solid var(--vscode-panel-border);
-  margin: 14px 0;
+  margin: 10px 0;
 }
 
 .assistant-text .md-quote {
-  margin: 10px 0;
-  padding: 8px 12px;
+  margin: 7px 0;
+  padding: 6px 9px;
   border-left: 3px solid var(--vscode-textBlockQuote-border, var(--vscode-panel-border));
   background: var(--vscode-textBlockQuote-background, rgba(127, 127, 127, 0.08));
   color: var(--vscode-foreground);
@@ -246,17 +246,58 @@ body {
 
 .code-block {
   display: block;
-  margin: 10px 0;
-  padding: 12px 14px;
-  background: var(--vscode-textCodeBlock-background, rgba(127, 127, 127, 0.12));
+  position: relative;
+  margin: 7px 0;
+  padding: 9px 11px;
+  background: color-mix(in srgb, var(--vscode-editor-background) 92%, #000);
   border: 1px solid var(--vscode-panel-border);
   border-radius: 6px;
   font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--vscode-editor-foreground, var(--vscode-foreground));
   overflow-x: auto;
   white-space: pre;
+}
+
+.code-block[data-lang] {
+  padding-top: 23px;
+}
+
+.code-block[data-lang]::before {
+  content: attr(data-lang);
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-family: var(--vscode-font-family);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+
+.tok-keyword {
+  color: var(--vscode-symbolIcon-keywordForeground, #c586c0);
+}
+
+.tok-string {
+  color: var(--vscode-symbolIcon-stringForeground, #ce9178);
+}
+
+.tok-comment {
+  color: var(--vscode-descriptionForeground);
+  font-style: italic;
+}
+
+.tok-number,
+.tok-literal {
+  color: var(--vscode-symbolIcon-numberForeground, #b5cea8);
+}
+
+.tok-property,
+.tok-selector {
+  color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe);
 }
 
 .inline-code {
@@ -277,7 +318,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px 8px;
+  padding: 5px 7px;
   border-radius: 6px;
   background: var(--vscode-editor-background);
   border: 1px solid var(--vscode-panel-border);
@@ -311,8 +352,8 @@ body {
 }
 
 .thought-body {
-  font-size: 12.5px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.45;
   color: var(--vscode-foreground);
   opacity: 0.85;
   padding-left: 2px;
@@ -358,7 +399,7 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border-bottom: 1px solid var(--vscode-panel-border);
   background: color-mix(in srgb, var(--vscode-sideBar-background) 50%, var(--vscode-editor-background));
 }
@@ -397,7 +438,7 @@ body {
 }
 
 .file-edit-preview {
-  max-height: 180px;
+  max-height: 150px;
   overflow: auto;
   font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
   font-size: 11.5px;
@@ -517,7 +558,7 @@ body {
 /* ── Permission card ── */
 .permission-card {
   align-self: stretch;
-  padding: 12px 14px;
+  padding: 9px 10px;
   border-radius: 10px;
   background: var(--vscode-editor-background);
   border: 1px solid var(--vscode-textLink-foreground, #3794ff);
@@ -691,7 +732,7 @@ body {
 /* ── Composer dock ── */
 .composer-dock {
   flex-shrink: 0;
-  padding: 8px 10px 10px;
+  padding: 6px 8px 8px;
   background: var(--vscode-sideBar-background);
   position: relative;
   overflow: visible;
@@ -855,7 +896,7 @@ body {
 
 .composer-card textarea {
   width: 100%;
-  min-height: 44px;
+  min-height: 38px;
   max-height: 140px;
   resize: none;
   border: none;
@@ -863,9 +904,9 @@ body {
   background: transparent;
   color: var(--vscode-input-foreground);
   font-family: inherit;
-  font-size: 13.5px;
-  line-height: 1.5;
-  padding: 10px 12px 4px;
+  font-size: 12.75px;
+  line-height: 1.42;
+  padding: 8px 10px 3px;
 }
 
 .composer-card textarea::placeholder {
@@ -881,7 +922,7 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 4px 8px 8px;
+  padding: 3px 7px 7px;
   gap: 8px;
 }
 
