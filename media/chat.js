@@ -339,6 +339,15 @@
     if (typeof config.autoApprovePermissions === "boolean") {
       applyAutoRun(config.autoApprovePermissions);
     }
+    if (openMenu === "model") {
+      const search = modelMenu.querySelector(".picker-search");
+      if (search) {
+        updateModelMenuList(search.value);
+      } else {
+        renderModelMenu("");
+        modelMenu.querySelector(".picker-search")?.focus();
+      }
+    }
   }
 
   function formatRelativeTime(iso) {
@@ -420,28 +429,26 @@
     }
   }
 
-  function renderModelMenu(filter) {
+  function updateModelMenuList(filter) {
     if (!sessionConfig?.models?.length) {
       modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
       return;
     }
+
     const query = (filter || "").trim().toLowerCase();
-    modelMenu.innerHTML = "";
+    let list = modelMenu.querySelector(".picker-list");
+    if (!list) {
+      list = document.createElement("div");
+      list.className = "picker-list";
+      modelMenu.appendChild(list);
+    }
 
-    const search = document.createElement("input");
-    search.type = "text";
-    search.className = "picker-search";
-    search.placeholder = "Search models";
-    search.value = filter || "";
-    search.addEventListener("input", () => renderModelMenu(search.value));
-    search.addEventListener("keydown", (e) => e.stopPropagation());
-    modelMenu.appendChild(search);
-
-    const list = document.createElement("div");
-    list.className = "picker-list";
+    list.innerHTML = "";
 
     const models = sessionConfig.models.filter((m) => {
-      if (!query) return true;
+      if (!query) {
+        return true;
+      }
       return m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query);
     });
 
@@ -451,7 +458,7 @@
       btn.className = "picker-item" + (model.id === sessionConfig.currentModelId ? " is-selected" : "");
       btn.innerHTML = `
         <span class="picker-item-body">
-          <span class="picker-item-title">${model.name}</span>
+          <span class="picker-item-title">${escapeHtml(model.name)}</span>
         </span>
         ${model.id === sessionConfig.currentModelId ? '<span class="picker-check">✓</span>' : ""}
       `;
@@ -470,8 +477,26 @@
       empty.textContent = "No models found";
       list.appendChild(empty);
     }
+  }
 
-    modelMenu.appendChild(list);
+  function renderModelMenu(filter) {
+    modelMenu.innerHTML = "";
+
+    if (!sessionConfig?.models?.length) {
+      modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
+      return;
+    }
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.className = "picker-search";
+    search.placeholder = "Search models";
+    search.value = filter || "";
+    search.addEventListener("input", () => updateModelMenuList(search.value));
+    search.addEventListener("keydown", (e) => e.stopPropagation());
+    modelMenu.appendChild(search);
+
+    updateModelMenuList(filter || "");
   }
 
   function toggleMenu(menuName) {
