@@ -18,6 +18,9 @@ type WebviewMessage =
   | { type: "setMode"; modeId: AgentMode }
   | { type: "setModel"; modelId: string }
   | { type: "permissionResponse"; id: string; decision: string }
+  | { type: "requestPermissionState" }
+  | { type: "removePermissionRule"; id: string }
+  | { type: "clearPermissionHistory" }
   | { type: "openFile"; path: string; line?: number }
   | { type: "selectSession"; sessionId: string }
   | { type: "setAutoApprove"; enabled: boolean }
@@ -31,6 +34,30 @@ interface PermissionPresentation {
   headline: string;
   detail: string;
   icon: string;
+}
+
+interface PermissionRequestState {
+  resolve: (decision: string) => void;
+  title: string;
+  kind?: string;
+  presentation: PermissionPresentation;
+}
+
+interface PermissionRule {
+  id: string;
+  headline: string;
+  detail: string;
+  kind?: string;
+  createdAt: string;
+}
+
+interface PermissionHistoryItem {
+  id: string;
+  headline: string;
+  detail: string;
+  decision: string;
+  autoApproved: boolean;
+  createdAt: string;
 }
 
 const MODE_ICONS: Record<AgentMode, string> = {
@@ -119,7 +146,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private mode: AgentMode = "agent";
   private modelId = "default[]";
   private sessionConfig?: SessionPickerConfig;
-  private permissionRequests = new Map<string, (decision: string) => void>();
+  private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
   private fileEdits = new Map<string, FileEditCardData>();
   private workspaceRoot = "";
@@ -179,7 +206,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleSetModel(msg.modelId);
           break;
         case "permissionResponse":
-          this.resolvePermission(msg.id, msg.decision);
+          await this.resolvePermission(msg.id, msg.decision);
+          break;
+        case "requestPermissionState":
+          this.postPermissionState();
+          break;
+        case "removePermissionRule":
+          await this.removePermissionRule(msg.id);
+          break;
+        case "clearPermissionHistory":
+          await this.clearPermissionHistory();
           break;
         case "openFile":
           await this.openFile(msg.path, msg.line);
@@ -675,13 +711,98 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private resolvePermission(id: string, decision: string): void {
-    const resolve = this.permissionRequests.get(id);
-    if (!resolve) {
+  private getPermissionRules(): PermissionRule[] {
+    return this.extensionContext.globalState.get<PermissionRule[]>("cursorAgent.permissionRules", []);
+  }
+
+  private getPermissionHistory(): PermissionHistoryItem[] {
+    return this.extensionContext.globalState.get<PermissionHistoryItem[]>("cursorAgent.permissionHistory", []);
+  }
+
+  private async savePermissionHistory(item: Omit<PermissionHistoryItem, "id" | "createdAt">): Promise<void> {
+    const next: PermissionHistoryItem[] = [
+      {
+        ...item,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...this.getPermissionHistory(),
+    ].slice(0, 30);
+
+    await this.extensionContext.globalState.update("cursorAgent.permissionHistory", next);
+    this.postPermissionState();
+  }
+
+  private async savePermissionRule(request: PermissionRequestState): Promise<void> {
+    const rules = this.getPermissionRules();
+    const exists = rules.some(
+      (rule) =>
+        rule.headline === request.presentation.headline &&
+        rule.detail === request.presentation.detail &&
+        rule.kind === request.kind
+    );
+    if (exists) {
+      return;
+    }
+
+    const next: PermissionRule[] = [
+      ...rules,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        headline: request.presentation.headline,
+        detail: request.presentation.detail,
+        kind: request.kind,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    await this.extensionContext.globalState.update("cursorAgent.permissionRules", next);
+  }
+
+  private findPermissionRule(title: string, kind?: string): PermissionRule | undefined {
+    const presentation = this.formatPermission(title, kind);
+    return this.getPermissionRules().find(
+      (rule) =>
+        rule.headline === presentation.headline &&
+        rule.detail === presentation.detail &&
+        rule.kind === kind
+    );
+  }
+
+  private async removePermissionRule(id: string): Promise<void> {
+    const next = this.getPermissionRules().filter((rule) => rule.id !== id);
+    await this.extensionContext.globalState.update("cursorAgent.permissionRules", next);
+    this.postPermissionState();
+  }
+
+  private async clearPermissionHistory(): Promise<void> {
+    await this.extensionContext.globalState.update("cursorAgent.permissionHistory", []);
+    this.postPermissionState();
+  }
+
+  private postPermissionState(): void {
+    this.post({
+      type: "permissionState",
+      rules: this.getPermissionRules(),
+      history: this.getPermissionHistory(),
+    });
+  }
+
+  private async resolvePermission(id: string, decision: string): Promise<void> {
+    const request = this.permissionRequests.get(id);
+    if (!request) {
       return;
     }
     this.permissionRequests.delete(id);
-    resolve(decision);
+    if (decision === "allow-always") {
+      await this.savePermissionRule(request);
+    }
+    await this.savePermissionHistory({
+      headline: request.presentation.headline,
+      detail: request.presentation.detail,
+      decision,
+      autoApproved: false,
+    });
+    request.resolve(decision === "allow-always" ? "allow-once" : decision);
   }
 
   private formatPermission(title: string, kind?: string): PermissionPresentation {
@@ -761,10 +882,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     client.on(
       "permission",
-      ({ title, kind, resolve }: { title: string; kind?: string; resolve: (v: string) => void }) => {
-        const id = String(++this.permissionCounter);
-        this.permissionRequests.set(id, resolve);
+      async ({ title, kind, resolve }: { title: string; kind?: string; resolve: (v: string) => void }) => {
         const presentation = this.formatPermission(title, kind);
+        const rule = this.findPermissionRule(title, kind);
+        if (rule) {
+          await this.savePermissionHistory({
+            headline: presentation.headline,
+            detail: presentation.detail,
+            decision: "allow-once",
+            autoApproved: true,
+          });
+          resolve("allow-once");
+          return;
+        }
+
+        const id = String(++this.permissionCounter);
+        this.permissionRequests.set(id, { resolve, title, kind, presentation });
         this.post({
           type: "permissionRequest",
           id,
@@ -1069,9 +1202,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span id="historyLabel">履歴</span>
       <span class="pill-chevron">▾</span>
     </button>
-    <button id="newChat" class="top-btn" type="button" title="新しいチャット">+ New Chat</button>
+    <div class="top-actions">
+      <button id="permissionsBtn" class="top-btn" type="button" title="権限ルール">権限</button>
+      <button id="newChat" class="top-btn" type="button" title="新しいチャット">+ New Chat</button>
+    </div>
   </div>
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
+  <div id="permissionsMenu" class="picker-menu picker-menu-wide permission-menu hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">
     <div class="boot-card">
       <div class="boot-main">

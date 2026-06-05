@@ -13,6 +13,8 @@
   const modelMenu = document.getElementById("modelMenu");
   const suggestMenu = document.getElementById("suggestMenu");
   const newChatBtn = document.getElementById("newChat");
+  const permissionsBtn = document.getElementById("permissionsBtn");
+  const permissionsMenu = document.getElementById("permissionsMenu");
   const historyBtn = document.getElementById("historyBtn");
   const historyMenu = document.getElementById("historyMenu");
   const historyLabel = document.getElementById("historyLabel");
@@ -55,6 +57,8 @@
   let autoApproveEnabled = false;
   let sessions = [];
   let currentSessionId = null;
+  let permissionRules = [];
+  let permissionHistory = [];
   let openMenu = null;
   let suggestState = null;
   let suggestTimer = null;
@@ -239,6 +243,7 @@
     modeMenu.classList.add("hidden");
     modelMenu.classList.add("hidden");
     historyMenu.classList.add("hidden");
+    permissionsMenu.classList.add("hidden");
     openMenu = null;
   }
 
@@ -513,6 +518,83 @@
     historyMenu.appendChild(list);
   }
 
+  function formatPermissionTime(iso) {
+    if (!iso) {
+      return "";
+    }
+    return formatRelativeTime(iso);
+  }
+
+  function renderPermissionMenu() {
+    permissionsMenu.innerHTML = "";
+
+    const rulesTitle = document.createElement("div");
+    rulesTitle.className = "permission-menu-title";
+    rulesTitle.textContent = "常に許可";
+    permissionsMenu.appendChild(rulesTitle);
+
+    const rulesList = document.createElement("div");
+    rulesList.className = "picker-list permission-list";
+    if (!permissionRules.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "保存済みルールはありません";
+      rulesList.appendChild(empty);
+    } else {
+      for (const rule of permissionRules) {
+        const row = document.createElement("div");
+        row.className = "permission-menu-row";
+        row.innerHTML = `
+          <span class="permission-menu-copy">
+            <span class="permission-menu-head">${escapeHtml(rule.headline || "ツール")}</span>
+            <span class="permission-menu-detail">${escapeHtml(rule.detail || "")}</span>
+          </span>
+          <button class="permission-menu-remove" type="button" title="削除">×</button>
+        `;
+        row.querySelector(".permission-menu-remove").addEventListener("click", () => {
+          vscode.postMessage({ type: "removePermissionRule", id: rule.id });
+        });
+        rulesList.appendChild(row);
+      }
+    }
+    permissionsMenu.appendChild(rulesList);
+
+    const historyTitle = document.createElement("div");
+    historyTitle.className = "permission-menu-title permission-menu-title-inline";
+    historyTitle.innerHTML = '<span>履歴</span><button class="permission-clear" type="button">消去</button>';
+    historyTitle.querySelector(".permission-clear").addEventListener("click", () => {
+      vscode.postMessage({ type: "clearPermissionHistory" });
+    });
+    permissionsMenu.appendChild(historyTitle);
+
+    const historyList = document.createElement("div");
+    historyList.className = "picker-list permission-list";
+    if (!permissionHistory.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "履歴はありません";
+      historyList.appendChild(empty);
+    } else {
+      for (const item of permissionHistory.slice(0, 12)) {
+        const row = document.createElement("div");
+        row.className = "permission-history-row";
+        const decision =
+          item.autoApproved ? "自動許可" :
+          item.decision === "reject-once" ? "拒否" :
+          item.decision === "allow-always" ? "常に許可" : "許可";
+        row.innerHTML = `
+          <span class="permission-menu-copy">
+            <span class="permission-menu-head">${escapeHtml(decision)} · ${escapeHtml(item.headline || "ツール")}</span>
+            <span class="permission-menu-detail">${escapeHtml(item.detail || "")}</span>
+          </span>
+          <span class="permission-menu-time">${escapeHtml(formatPermissionTime(item.createdAt))}</span>
+        `;
+        historyList.appendChild(row);
+      }
+    }
+    permissionsMenu.appendChild(historyList);
+  }
+
   function renderModeMenu() {
     if (!sessionConfig?.modes?.length) {
       modeMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
@@ -634,6 +716,11 @@
       renderHistoryMenu();
       historyMenu.classList.remove("hidden");
       positionMenu(historyMenu, historyBtn, "below");
+    } else if (menuName === "permissions") {
+      vscode.postMessage({ type: "requestPermissionState" });
+      renderPermissionMenu();
+      permissionsMenu.classList.remove("hidden");
+      positionMenu(permissionsMenu, permissionsBtn, "below");
     }
   }
 
@@ -1346,6 +1433,11 @@
     toggleMenu("history");
   });
 
+  permissionsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleMenu("permissions");
+  });
+
   modePill.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleMenu("mode");
@@ -1377,6 +1469,7 @@
   modeMenu.addEventListener("click", (e) => e.stopPropagation());
   modelMenu.addEventListener("click", (e) => e.stopPropagation());
   historyMenu.addEventListener("click", (e) => e.stopPropagation());
+  permissionsMenu.addEventListener("click", (e) => e.stopPropagation());
 
   suggestMenu.addEventListener("mousedown", (e) => e.stopPropagation());
 
@@ -1550,6 +1643,14 @@
       case "settings":
         if (typeof msg.autoApprovePermissions === "boolean") {
           applyAutoRun(msg.autoApprovePermissions);
+        }
+        break;
+
+      case "permissionState":
+        permissionRules = msg.rules || [];
+        permissionHistory = msg.history || [];
+        if (openMenu === "permissions") {
+          renderPermissionMenu();
         }
         break;
 
