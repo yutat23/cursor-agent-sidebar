@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { AcpClient, AgentMode } from "./acpClient";
@@ -20,6 +21,9 @@ type WebviewMessage =
   | { type: "selectSession"; sessionId: string }
   | { type: "setAutoApprove"; enabled: boolean }
   | { type: "refreshSessions" }
+  | { type: "retryConnect" }
+  | { type: "openSettings" }
+  | { type: "runDiagnostics" }
   | { type: "ready" };
 
 interface PermissionPresentation {
@@ -37,6 +41,12 @@ const MODE_ICONS: Record<AgentMode, string> = {
 const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_IMAGE_ATTACHMENTS = 4;
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+interface DiagnosticResult {
+  label: string;
+  ok: boolean;
+  output: string;
+}
 
 function sanitizeImageAttachments(images: PromptImageAttachment[] | undefined): PromptImageAttachment[] {
   if (!images?.length) {
@@ -178,6 +188,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "refreshSessions":
           await this.refreshSessions();
+          break;
+        case "retryConnect":
+          await this.handleRetryConnect();
+          break;
+        case "openSettings":
+          await vscode.commands.executeCommand("workbench.action.openSettings", "cursorAgent.agentPath");
+          break;
+        case "runDiagnostics":
+          await this.handleRunDiagnostics();
           break;
       }
     });
@@ -328,6 +347,89 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.abandonClient(client);
       throw err;
     }
+  }
+
+  private async handleRetryConnect(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+
+    this.connectEpoch++;
+    this.connectPromise = undefined;
+    this.client?.dispose();
+    this.client = undefined;
+    this.sessionConfig = undefined;
+    await this.ensureClient().catch(() => undefined);
+  }
+
+  private async handleRunDiagnostics(): Promise<void> {
+    const config = vscode.workspace.getConfiguration("cursorAgent");
+    const agentPath = config.get<string>("agentPath", "agent");
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+    this.post({
+      type: "diagnostics",
+      running: true,
+      results: [{ label: "診断", ok: true, output: "Cursor CLI を確認中..." }],
+    });
+
+    const results = await Promise.all([
+      this.runAgentDiagnostic(agentPath, cwd, ["--version"], "agent --version"),
+      this.runAgentDiagnostic(agentPath, cwd, ["status"], "agent status"),
+    ]);
+
+    this.post({ type: "diagnostics", running: false, results });
+  }
+
+  private runAgentDiagnostic(
+    agentPath: string,
+    cwd: string,
+    args: string[],
+    label: string
+  ): Promise<DiagnosticResult> {
+    return new Promise((resolve) => {
+      const child = spawn(agentPath, args, {
+        cwd,
+        shell: process.platform === "win32",
+        env: { ...process.env },
+      });
+
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        child.kill();
+        resolve({ label, ok: false, output: "タイムアウトしました" });
+      }, 8_000);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", (err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve({ label, ok: false, output: err.message });
+      });
+      child.on("exit", (code) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        const output = `${stdout}${stderr}`.trim() || `(exit code ${code ?? "unknown"})`;
+        resolve({ label, ok: code === 0, output });
+      });
+    });
   }
 
   private async refreshSessions(): Promise<void> {
@@ -957,8 +1059,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">
     <div class="boot-card">
-      <span class="boot-spinner"></span>
-      <span id="bootLabel">エージェントに接続中...</span>
+      <div class="boot-main">
+        <span class="boot-spinner"></span>
+        <span id="bootLabel">エージェントに接続中...</span>
+      </div>
+      <div id="bootActions" class="boot-actions hidden">
+        <button id="retryConnectBtn" class="boot-action" type="button">再接続</button>
+        <button id="diagnoseBtn" class="boot-action" type="button">診断</button>
+        <button id="openSettingsBtn" class="boot-action" type="button">設定</button>
+      </div>
+      <div id="diagnosticsPanel" class="diagnostics-panel hidden"></div>
     </div>
   </div>
   <main id="thread" class="thread" aria-live="polite"></main>

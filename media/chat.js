@@ -18,6 +18,11 @@
   const historyLabel = document.getElementById("historyLabel");
   const bootOverlay = document.getElementById("bootOverlay");
   const bootLabel = document.getElementById("bootLabel");
+  const bootActions = document.getElementById("bootActions");
+  const retryConnectBtn = document.getElementById("retryConnectBtn");
+  const diagnoseBtn = document.getElementById("diagnoseBtn");
+  const openSettingsBtn = document.getElementById("openSettingsBtn");
+  const diagnosticsPanel = document.getElementById("diagnosticsPanel");
   const taskStatus = document.getElementById("taskStatus");
   const taskLabel = document.getElementById("taskLabel");
   const attachmentTray = document.getElementById("attachmentTray");
@@ -103,6 +108,9 @@
     if (status === "loading") {
       bootOverlay.classList.remove("hidden");
       bootLabel.textContent = message || "エージェントに接続中...";
+      bootActions.classList.add("hidden");
+      diagnosticsPanel.classList.add("hidden");
+      diagnosticsPanel.innerHTML = "";
       sessionReady = false;
       updateInteractiveState();
       return;
@@ -111,6 +119,7 @@
     if (status === "error") {
       bootOverlay.classList.remove("hidden");
       bootLabel.textContent = message || "接続に失敗しました";
+      bootActions.classList.remove("hidden");
       sessionReady = false;
       updateInteractiveState();
       return;
@@ -118,8 +127,30 @@
 
     if (status === "ready") {
       bootOverlay.classList.add("hidden");
+      bootActions.classList.add("hidden");
+      diagnosticsPanel.classList.add("hidden");
+      diagnosticsPanel.innerHTML = "";
       sessionReady = true;
       updateInteractiveState();
+    }
+  }
+
+  function renderDiagnostics(results, running) {
+    diagnosticsPanel.innerHTML = "";
+    diagnosticsPanel.classList.remove("hidden");
+    diagnoseBtn.disabled = !!running;
+
+    for (const result of results || []) {
+      const row = document.createElement("div");
+      row.className = `diagnostic-row${result.ok ? " is-ok" : " is-error"}`;
+      row.innerHTML = `
+        <div class="diagnostic-head">
+          <span class="diagnostic-dot"></span>
+          <span class="diagnostic-label">${escapeHtml(result.label || "診断")}</span>
+        </div>
+        <pre class="diagnostic-output">${escapeHtml(result.output || "")}</pre>
+      `;
+      diagnosticsPanel.appendChild(row);
     }
   }
 
@@ -1248,6 +1279,18 @@
     vscode.postMessage({ type: "setAutoApprove", enabled: !autoApproveEnabled });
   });
 
+  retryConnectBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "retryConnect" });
+  });
+
+  diagnoseBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "runDiagnostics" });
+  });
+
+  openSettingsBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "openSettings" });
+  });
+
   modeMenu.addEventListener("click", (e) => e.stopPropagation());
   modelMenu.addEventListener("click", (e) => e.stopPropagation());
   historyMenu.addEventListener("click", (e) => e.stopPropagation());
@@ -1383,6 +1426,10 @@
 
       case "init":
         setBootState(msg.status, msg.message);
+        break;
+
+      case "diagnostics":
+        renderDiagnostics(msg.results, msg.running);
         break;
 
       case "sessions":

@@ -1176,7 +1176,8 @@ body {
 
 .boot-card {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 10px;
   padding: 12px 16px;
   border-radius: 10px;
@@ -1185,6 +1186,13 @@ body {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.12);
   font-size: 12px;
   color: var(--vscode-descriptionForeground);
+  width: min(360px, calc(100vw - 32px));
+}
+
+.boot-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
 }
 
 .boot-spinner {
@@ -1195,6 +1203,83 @@ body {
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
   flex-shrink: 0;
+}
+
+.boot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.boot-action {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-button-secondaryBackground, rgba(128, 128, 128, 0.15));
+  color: var(--vscode-foreground);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 10px;
+}
+
+.boot-action:hover:not(:disabled) {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.boot-action:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
+.diagnostics-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: min(300px, 50vh);
+  overflow-y: auto;
+}
+
+.diagnostic-row {
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  padding: 8px;
+  background: var(--vscode-sideBar-background);
+}
+
+.diagnostic-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--vscode-foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.diagnostic-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--vscode-progressBar-background, #3794ff);
+}
+
+.diagnostic-row.is-ok .diagnostic-dot {
+  background: var(--vscode-testing-iconPassed, #73c991);
+}
+
+.diagnostic-row.is-error .diagnostic-dot {
+  background: var(--vscode-errorForeground, #f48771);
+}
+
+.diagnostic-output {
+  margin: 0;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--vscode-editor-font-family, Consolas, monospace);
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--vscode-descriptionForeground);
 }
 
 .session-loading {
