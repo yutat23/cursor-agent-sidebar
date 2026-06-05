@@ -933,6 +933,12 @@
       html = html.replace(/([a-zA-Z-]+)(\s*:)/g, '<span class="tok-property">$1</span>$2');
     } else if (["sh", "bash"].includes(language)) {
       html = html.replace(/\b(if|then|else|fi|for|do|done|case|esac|while|function|export|local|return|set)\b/g, '<span class="tok-keyword">$1</span>');
+    } else if (language === "mermaid") {
+      html = html.replace(
+        /\b(sequenceDiagram|flowchart|graph|participant|actor|as|note|over|right|left|of|loop|alt|else|opt|par|and|end|classDiagram|stateDiagram|erDiagram|gantt|pie|journey)\b/g,
+        '<span class="tok-keyword">$1</span>'
+      );
+      html = html.replace(/(--&gt;|--&gt;&gt;|-&gt;&gt;|--|---|==&gt;|-\.-&gt;)/g, '<span class="tok-operator">$1</span>');
     }
 
     html = html.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');

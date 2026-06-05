@@ -12,6 +12,36 @@ body {
   display: flex;
   flex-direction: column;
   height: 100vh;
+  --chat-code-foreground: #334155;
+  --chat-code-keyword: #7c3aed;
+  --chat-code-string: #047857;
+  --chat-code-comment: #64748b;
+  --chat-code-number: #b45309;
+  --chat-code-property: #0369a1;
+  --chat-code-selector: #be123c;
+  --chat-code-operator: #9333ea;
+}
+
+body.vscode-dark {
+  --chat-code-foreground: #d4d4d4;
+  --chat-code-keyword: #c586c0;
+  --chat-code-string: #ce9178;
+  --chat-code-comment: #6a9955;
+  --chat-code-number: #b5cea8;
+  --chat-code-property: #9cdcfe;
+  --chat-code-selector: #d7ba7d;
+  --chat-code-operator: #dcdcaa;
+}
+
+body.vscode-high-contrast {
+  --chat-code-foreground: var(--vscode-editor-foreground, #fff);
+  --chat-code-keyword: #ff9da4;
+  --chat-code-string: #f7f99d;
+  --chat-code-comment: #a8a8a8;
+  --chat-code-number: #b6fcb6;
+  --chat-code-property: #9cdcfe;
+  --chat-code-selector: #ffcc66;
+  --chat-code-operator: #ffffff;
 }
 
 .hidden {
@@ -255,7 +285,7 @@ body {
   font-family: var(--vscode-editor-font-family, Consolas, "Courier New", monospace);
   font-size: 12px;
   line-height: 1.45;
-  color: var(--vscode-editor-foreground, var(--vscode-foreground));
+  color: var(--chat-code-foreground);
   overflow-x: auto;
   white-space: pre;
 }
@@ -278,26 +308,36 @@ body {
 }
 
 .tok-keyword {
-  color: var(--vscode-symbolIcon-keywordForeground, #c586c0);
+  color: var(--chat-code-keyword);
+  font-weight: 600;
 }
 
 .tok-string {
-  color: var(--vscode-symbolIcon-stringForeground, #ce9178);
+  color: var(--chat-code-string);
 }
 
 .tok-comment {
-  color: var(--vscode-descriptionForeground);
+  color: var(--chat-code-comment);
   font-style: italic;
 }
 
 .tok-number,
 .tok-literal {
-  color: var(--vscode-symbolIcon-numberForeground, #b5cea8);
+  color: var(--chat-code-number);
 }
 
 .tok-property,
 .tok-selector {
-  color: var(--vscode-symbolIcon-propertyForeground, #9cdcfe);
+  color: var(--chat-code-property);
+}
+
+.tok-selector {
+  color: var(--chat-code-selector);
+}
+
+.tok-operator {
+  color: var(--chat-code-operator);
+  font-weight: 700;
 }
 
 .inline-code {
