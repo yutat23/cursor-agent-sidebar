@@ -294,7 +294,7 @@
     const bottom = window.innerHeight - rect.top + 8;
     suggestMenu.style.left = `${left}px`;
     suggestMenu.style.bottom = `${bottom}px`;
-    suggestMenu.style.width = `${Math.min(360, Math.max(220, rect.width))}px`;
+    suggestMenu.style.width = `${Math.min(420, Math.max(240, rect.width))}px`;
   }
 
   function renderSuggestMenu() {
@@ -307,7 +307,10 @@
     suggestState.items.forEach((item, index) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "suggest-item" + (index === suggestState.activeIndex ? " is-active" : "");
+      btn.className =
+        "suggest-item" +
+        (suggestState.kind === "file" ? " is-file-suggest" : " is-slash-suggest") +
+        (index === suggestState.activeIndex ? " is-active" : "");
       btn.dataset.index = String(index);
       const kindLabel =
         item.kind === "skill"

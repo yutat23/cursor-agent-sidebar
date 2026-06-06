@@ -1040,7 +1040,7 @@ body.vscode-high-contrast {
 .suggest-menu {
   position: fixed;
   z-index: 1200;
-  max-height: 280px;
+  max-height: min(360px, 55vh);
   overflow-y: auto;
   background: color-mix(in srgb, var(--vscode-dropdown-background, var(--vscode-editor-background)) 94%, var(--vscode-sideBar-background));
   border: 1px solid color-mix(in srgb, var(--vscode-focusBorder, var(--vscode-panel-border)) 42%, var(--vscode-panel-border));
@@ -1068,6 +1068,13 @@ body.vscode-high-contrast {
   position: relative;
 }
 
+.suggest-item.is-file-suggest {
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  padding: 3px 6px;
+}
+
 .suggest-item:hover,
 .suggest-item.is-active {
   background: color-mix(in srgb, var(--vscode-list-activeSelectionBackground, rgba(128, 128, 128, 0.2)) 70%, transparent);
@@ -1084,6 +1091,11 @@ body.vscode-high-contrast {
   background: var(--vscode-focusBorder, var(--vscode-textLink-foreground, #3794ff));
 }
 
+.suggest-item.is-file-suggest.is-active::before {
+  top: 4px;
+  bottom: 4px;
+}
+
 .suggest-kind {
   flex-shrink: 0;
   min-width: 34px;
@@ -1098,11 +1110,27 @@ body.vscode-high-contrast {
   text-align: center;
 }
 
+.suggest-item.is-file-suggest .suggest-kind {
+  min-width: 28px;
+  padding: 1px 4px;
+  font-size: 8.5px;
+  line-height: 1.35;
+  border-radius: 3px;
+}
+
 .suggest-body {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
+}
+
+.suggest-item.is-file-suggest .suggest-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
 }
 
 .suggest-label {
@@ -1113,12 +1141,23 @@ body.vscode-high-contrast {
   white-space: nowrap;
 }
 
+.suggest-item.is-file-suggest .suggest-label {
+  font-size: 12px;
+  line-height: 1.2;
+}
+
 .suggest-detail {
   font-size: 11px;
   color: var(--vscode-descriptionForeground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.suggest-item.is-file-suggest .suggest-detail {
+  max-width: 96px;
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .picker-menu {
