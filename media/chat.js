@@ -313,9 +313,9 @@
         item.kind === "skill"
           ? "Skill"
           : item.kind === "command"
-            ? "Command"
+            ? "Cmd"
             : item.kind === "folder"
-              ? "Folder"
+              ? "Dir"
               : "File";
       btn.innerHTML = `
         <span class="suggest-kind">${kindLabel}</span>
