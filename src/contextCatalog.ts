@@ -74,6 +74,22 @@ function rankMatch(rel: string, query: string): number {
   return 3;
 }
 
+function pathDepth(label: string): number {
+  return label.replace(/\/$/, "").split("/").length - 1;
+}
+
+function compareSuggestItems(a: SuggestItem, b: SuggestItem, query: string): number {
+  const rankDiff = rankMatch(a.label, query) - rankMatch(b.label, query);
+  if (rankDiff !== 0) {
+    return rankDiff;
+  }
+  const depthDiff = pathDepth(a.label) - pathDepth(b.label);
+  if (depthDiff !== 0) {
+    return depthDiff;
+  }
+  return a.label.localeCompare(b.label);
+}
+
 async function collectFolderItems(
   workspaceRoot: string,
   query: string,
@@ -83,7 +99,7 @@ async function collectFolderItems(
   const seen = new Set<string>();
 
   async function walk(absDir: string, relDir: string, depth: number): Promise<void> {
-    if (items.length >= limit || depth > 8) {
+    if (items.length >= limit || depth > 2) {
       return;
     }
 
@@ -120,14 +136,115 @@ async function collectFolderItems(
         }
       }
 
-      const lastSegment = query.split("/").pop() ?? query;
-      const shouldRecurse =
-        !query ||
-        rel.toLowerCase().includes(query) ||
-        entry.name.toLowerCase().includes(lastSegment) ||
-        query.startsWith(`${rel}/`);
+      if (!query) {
+        await walk(nodePath.join(absDir, entry.name), rel, depth + 1);
+      }
+    }
+  }
 
-      if (shouldRecurse) {
+  await walk(workspaceRoot, "", 0);
+  return items;
+}
+
+async function collectWorkspacePathItems(
+  workspaceRoot: string,
+  query: string,
+  limit: number
+): Promise<SuggestItem[]> {
+  if (!query) {
+    return collectFileItemsShallow(workspaceRoot, limit);
+  }
+
+  const uris = await vscode.workspace.findFiles(
+    new vscode.RelativePattern(vscode.Uri.file(workspaceRoot), "**/*"),
+    "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}",
+    Math.max(limit * 20, 1_000)
+  );
+
+  const items: SuggestItem[] = [];
+  const folders = new Set<string>();
+  const seen = new Set<string>();
+
+  for (const uri of uris) {
+    const rel = nodePath.relative(workspaceRoot, uri.fsPath).replace(/\\/g, "/");
+    if (!rel || shouldIgnoreRelativePath(rel)) {
+      continue;
+    }
+
+    if (matchesQuery(rel, query) && !seen.has(`file:${rel}`)) {
+      seen.add(`file:${rel}`);
+      items.push({
+        id: `file:${rel}`,
+        label: rel,
+        detail: nodePath.basename(rel),
+        insertText: rel,
+        kind: "file",
+      });
+    }
+
+    const parts = rel.split("/");
+    for (let i = 1; i < parts.length; i++) {
+      const dir = parts.slice(0, i).join("/");
+      if (!shouldIgnoreRelativePath(dir) && matchesQuery(dir, query)) {
+        folders.add(dir);
+      }
+    }
+  }
+
+  for (const dir of folders) {
+    if (!seen.has(`folder:${dir}`)) {
+      seen.add(`folder:${dir}`);
+      items.push({
+        id: `folder:${dir}`,
+        label: `${dir}/`,
+        detail: "Folder",
+        insertText: `${dir}/`,
+        kind: "folder",
+      });
+    }
+  }
+
+  items.sort((a, b) => compareSuggestItems(a, b, query));
+  return items.slice(0, limit);
+}
+
+async function collectFileItemsShallow(workspaceRoot: string, limit: number): Promise<SuggestItem[]> {
+  const items: SuggestItem[] = [];
+  const seen = new Set<string>();
+
+  async function walk(absDir: string, relDir: string, depth: number): Promise<void> {
+    if (items.length >= limit || depth > 2) {
+      return;
+    }
+
+    let entries;
+    try {
+      entries = await fs.readdir(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+
+    for (const entry of entries) {
+      const rel = relDir ? `${relDir}/${entry.name}` : entry.name;
+      if (shouldIgnoreRelativePath(rel)) {
+        continue;
+      }
+
+      if (entry.isFile() && !seen.has(rel)) {
+        seen.add(rel);
+        items.push({
+          id: `file:${rel}`,
+          label: rel,
+          detail: nodePath.basename(rel),
+          insertText: rel,
+          kind: "file",
+        });
+        continue;
+      }
+
+      if (entry.isDirectory() && !IGNORE_DIRS.has(entry.name)) {
         await walk(nodePath.join(absDir, entry.name), rel, depth + 1);
       }
     }
@@ -298,66 +415,28 @@ export async function searchSlashItems(query: string, workspaceRoot: string): Pr
     }));
 }
 
-/**
- * findFiles の glob は大文字小文字を区別するため、
- * 英字を [tT] のような文字クラスに展開して大文字小文字非依存にする。
- * glob の特殊文字も文字クラスに包んで無効化する。
- */
-function toCaseInsensitiveGlob(text: string): string {
-  return text
-    .split("")
-    .map((ch) => {
-      const lower = ch.toLowerCase();
-      const upper = ch.toUpperCase();
-      if (lower !== upper) {
-        return `[${lower}${upper}]`;
-      }
-      if ("*?[]{}()!".includes(ch)) {
-        return `[${ch}]`;
-      }
-      return ch;
-    })
-    .join("");
-}
-
 export async function searchFileItems(query: string, workspaceRoot: string): Promise<SuggestItem[]> {
   const q = query.trim().toLowerCase().replace(/\\/g, "/");
   if (!workspaceRoot) {
     return [];
   }
 
-  const lastSegment = q.split("/").pop() ?? q;
-  const pattern =
-    lastSegment.length > 0
-      ? `**/*${toCaseInsensitiveGlob(lastSegment)}*`
-      : "**/*";
+  if (q) {
+    return collectWorkspacePathItems(workspaceRoot, q, 40);
+  }
 
-  const [uris, folderItems] = await Promise.all([
-    vscode.workspace.findFiles(
-      pattern,
-      "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**,**/.next/**,**/coverage/**}",
-      80
-    ),
+  const [folderItems, fileItems] = await Promise.all([
     collectFolderItems(workspaceRoot, q, 30),
+    collectWorkspacePathItems(workspaceRoot, q, 80),
   ]);
 
   const folderPaths = new Set<string>();
-  const fileItems: SuggestItem[] = [];
-
   for (const item of folderItems) {
     folderPaths.add(item.insertText.replace(/\/$/, ""));
   }
 
-  for (const uri of uris) {
-    const fullPath = uri.fsPath;
-    const rel = nodePath.relative(workspaceRoot, fullPath).replace(/\\/g, "/");
-    if (!rel || rel.startsWith("..") || shouldIgnoreRelativePath(rel)) {
-      continue;
-    }
-    if (q && !matchesQuery(rel, q)) {
-      continue;
-    }
-
+  for (const item of fileItems) {
+    const rel = item.insertText;
     const parts = rel.split("/");
     for (let i = 1; i < parts.length; i++) {
       const dir = parts.slice(0, i).join("/");
@@ -372,28 +451,11 @@ export async function searchFileItems(query: string, workspaceRoot: string): Pro
         });
       }
     }
-
-    fileItems.push({
-      id: `file:${rel}`,
-      label: rel,
-      detail: nodePath.basename(rel),
-      insertText: rel,
-      kind: "file",
-    });
   }
 
   const folders = [...new Map(folderItems.map((item) => [item.insertText, item])).values()];
   const merged = [...folders, ...fileItems];
-  merged.sort((a, b) => {
-    const rankDiff = rankMatch(a.label, q) - rankMatch(b.label, q);
-    if (rankDiff !== 0) {
-      return rankDiff;
-    }
-    if (a.kind !== b.kind) {
-      return a.kind === "folder" ? -1 : 1;
-    }
-    return a.label.localeCompare(b.label);
-  });
+  merged.sort((a, b) => compareSuggestItems(a, b, q));
 
   return merged.slice(0, 20);
 }
@@ -455,6 +517,53 @@ export async function readFolderContext(
   }
 
   return blocks.join("\n\n");
+}
+
+export async function estimateFolderContext(
+  folderPath: string,
+  maxFiles = 20,
+  maxCharsPerFile = 8_000
+): Promise<{ files: number; chars: number }> {
+  try {
+    const stat = await fs.stat(folderPath);
+    if (!stat.isDirectory()) {
+      return { files: 0, chars: 0 };
+    }
+  } catch {
+    return { files: 0, chars: 0 };
+  }
+
+  const uris = await vscode.workspace.findFiles(
+    new vscode.RelativePattern(vscode.Uri.file(folderPath), "**/*"),
+    "{**/node_modules/**,**/.git/**,**/dist/**,**/out/**,**/build/**}",
+    maxFiles * 3
+  );
+
+  let files = 0;
+  let chars = 0;
+  for (const uri of uris) {
+    if (files >= maxFiles) {
+      break;
+    }
+
+    const ext = nodePath.extname(uri.fsPath).toLowerCase();
+    if (!TEXT_FILE_EXTENSIONS.has(ext)) {
+      continue;
+    }
+
+    try {
+      const stat = await fs.stat(uri.fsPath);
+      if (!stat.isFile() || stat.size > maxCharsPerFile * 2) {
+        continue;
+      }
+      files++;
+      chars += Math.min(stat.size, maxCharsPerFile);
+    } catch {
+      continue;
+    }
+  }
+
+  return { files, chars };
 }
 
 export async function loadSlashContent(name: string, workspaceRoot: string): Promise<string | undefined> {

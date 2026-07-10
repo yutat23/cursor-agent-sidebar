@@ -13,15 +13,34 @@
   const modelMenu = document.getElementById("modelMenu");
   const suggestMenu = document.getElementById("suggestMenu");
   const newChatBtn = document.getElementById("newChat");
+  const usageBtn = document.getElementById("usageBtn");
+  const changesBtn = document.getElementById("changesBtn");
+  const changesMenu = document.getElementById("changesMenu");
+  const permissionsBtn = document.getElementById("permissionsBtn");
+  const permissionsMenu = document.getElementById("permissionsMenu");
   const historyBtn = document.getElementById("historyBtn");
   const historyMenu = document.getElementById("historyMenu");
   const historyLabel = document.getElementById("historyLabel");
   const bootOverlay = document.getElementById("bootOverlay");
   const bootLabel = document.getElementById("bootLabel");
+  const bootActions = document.getElementById("bootActions");
+  const retryConnectBtn = document.getElementById("retryConnectBtn");
+  const diagnoseBtn = document.getElementById("diagnoseBtn");
+  const openSettingsBtn = document.getElementById("openSettingsBtn");
+  const diagnosticsPanel = document.getElementById("diagnosticsPanel");
   const taskStatus = document.getElementById("taskStatus");
   const taskLabel = document.getElementById("taskLabel");
   const emptyState = document.getElementById("emptyState");
   const jumpBottom = document.getElementById("jumpBottom");
+  const contextTray = document.getElementById("contextTray");
+  const attachmentTray = document.getElementById("attachmentTray");
+
+  const MAX_IMAGE_ATTACHMENTS = 4;
+  const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+  const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp"]);
+
+  let pendingAttachments = [];
+  let attachmentIdCounter = 0;
 
   let busy = false;
   let stopping = false;
@@ -43,10 +62,16 @@
   let autoApproveEnabled = false;
   let sessions = [];
   let currentSessionId = null;
+  let changeReviewItems = [];
+  let permissionRules = [];
+  let permissionHistory = [];
   let openMenu = null;
   let suggestState = null;
   let suggestTimer = null;
   let suggestRequestId = 0;
+  let contextPreviewTimer = null;
+  let contextPreviewText = "";
+  let isComposing = false;
 
   function requestCancel() {
     if (!busy || stopping) return;
@@ -98,6 +123,9 @@
     if (status === "loading") {
       bootOverlay.classList.remove("hidden");
       bootLabel.textContent = message || "エージェントに接続中...";
+      bootActions.classList.add("hidden");
+      diagnosticsPanel.classList.add("hidden");
+      diagnosticsPanel.innerHTML = "";
       sessionReady = false;
       updateInteractiveState();
       return;
@@ -106,6 +134,7 @@
     if (status === "error") {
       bootOverlay.classList.remove("hidden");
       bootLabel.textContent = message || "接続に失敗しました";
+      bootActions.classList.remove("hidden");
       sessionReady = false;
       updateInteractiveState();
       return;
@@ -113,8 +142,108 @@
 
     if (status === "ready") {
       bootOverlay.classList.add("hidden");
+      bootActions.classList.add("hidden");
+      diagnosticsPanel.classList.add("hidden");
+      diagnosticsPanel.innerHTML = "";
       sessionReady = true;
       updateInteractiveState();
+    }
+  }
+
+  function renderDiagnostics(results, running) {
+    diagnosticsPanel.innerHTML = "";
+    diagnosticsPanel.classList.remove("hidden");
+    diagnoseBtn.disabled = !!running;
+
+    for (const result of results || []) {
+      const row = document.createElement("div");
+      row.className = `diagnostic-row${result.ok ? " is-ok" : " is-error"}`;
+      row.innerHTML = `
+        <div class="diagnostic-head">
+          <span class="diagnostic-dot"></span>
+          <span class="diagnostic-label">${escapeHtml(result.label || "診断")}</span>
+        </div>
+        <pre class="diagnostic-output">${escapeHtml(result.output || "")}</pre>
+      `;
+      diagnosticsPanel.appendChild(row);
+    }
+  }
+
+  function hasContextReference(text) {
+    return /(^|\n)\/[\w-]+/.test(text.trim()) || /@([^\s@]+)/.test(text);
+  }
+
+  function formatChars(chars) {
+    if (!chars) {
+      return "0 chars";
+    }
+    if (chars >= 1000) {
+      return `${(chars / 1000).toFixed(chars >= 10000 ? 0 : 1)}k chars`;
+    }
+    return `${chars} chars`;
+  }
+
+  function queueContextPreview() {
+    clearTimeout(contextPreviewTimer);
+    const text = inputEl.value;
+    contextPreviewText = text;
+
+    if (!sessionReady || busy || !hasContextReference(text)) {
+      renderContextPreview([]);
+      return;
+    }
+
+    contextPreviewTimer = setTimeout(() => {
+      vscode.postMessage({ type: "requestContextPreview", text });
+    }, 180);
+  }
+
+  function removeContextReference(item) {
+    if (!item?.replaceText) {
+      return;
+    }
+    const escaped = item.replaceText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    inputEl.value = inputEl.value.replace(new RegExp(`${escaped}\\s?`, "g"), "");
+    inputEl.focus();
+    inputEl.dispatchEvent(new Event("input"));
+  }
+
+  function renderContextPreview(items, error) {
+    if (!contextTray) {
+      return;
+    }
+
+    contextTray.innerHTML = "";
+    if (error) {
+      contextTray.classList.remove("hidden");
+      const errorEl = document.createElement("div");
+      errorEl.className = "context-error";
+      errorEl.textContent = error;
+      contextTray.appendChild(errorEl);
+      return;
+    }
+
+    if (!items?.length) {
+      contextTray.classList.add("hidden");
+      return;
+    }
+
+    contextTray.classList.remove("hidden");
+    for (const item of items) {
+      const chip = document.createElement("div");
+      chip.className = `context-chip${item.status === "missing" ? " is-missing" : ""}`;
+      const kindLabel =
+        item.kind === "folder" ? "Folder" : item.kind === "command" ? "Prompt" : item.kind === "missing" ? "Missing" : "File";
+      chip.innerHTML = `
+        <span class="context-kind">${kindLabel}</span>
+        <span class="context-body">
+          <span class="context-label" title="${escapeHtml(item.label || "")}">${escapeHtml(item.label || "")}</span>
+          <span class="context-detail">${escapeHtml(item.detail || "")} · ${formatChars(item.chars || 0)}</span>
+        </span>
+        <button class="context-remove" type="button" aria-label="Remove context">×</button>
+      `;
+      chip.querySelector(".context-remove").addEventListener("click", () => removeContextReference(item));
+      contextTray.appendChild(chip);
     }
   }
 
@@ -122,6 +251,8 @@
     modeMenu.classList.add("hidden");
     modelMenu.classList.add("hidden");
     historyMenu.classList.add("hidden");
+    changesMenu.classList.add("hidden");
+    permissionsMenu.classList.add("hidden");
     openMenu = null;
   }
 
@@ -214,7 +345,10 @@
     suggestState.items.forEach((item, index) => {
       const btn = document.createElement("button");
       btn.type = "button";
-      btn.className = "suggest-item" + (index === suggestState.activeIndex ? " is-active" : "");
+      btn.className =
+        "suggest-item" +
+        (suggestState.kind === "file" ? " is-file-suggest" : " is-slash-suggest") +
+        (index === suggestState.activeIndex ? " is-active" : "");
       btn.dataset.index = String(index);
       const { name, sub } = splitSuggestLabel(item);
       btn.innerHTML = `
@@ -360,6 +494,15 @@
     if (typeof config.autoApprovePermissions === "boolean") {
       applyAutoRun(config.autoApprovePermissions);
     }
+    if (openMenu === "model") {
+      const search = modelMenu.querySelector(".picker-search");
+      if (search) {
+        updateModelMenuList(search.value);
+      } else {
+        renderModelMenu("");
+        modelMenu.querySelector(".picker-search")?.focus();
+      }
+    }
   }
 
   function formatRelativeTime(iso) {
@@ -413,6 +556,130 @@
     historyMenu.appendChild(list);
   }
 
+  function formatPermissionTime(iso) {
+    if (!iso) {
+      return "";
+    }
+    return formatRelativeTime(iso);
+  }
+
+  function renderPermissionMenu() {
+    permissionsMenu.innerHTML = "";
+
+    const rulesTitle = document.createElement("div");
+    rulesTitle.className = "permission-menu-title";
+    rulesTitle.textContent = "常に許可";
+    permissionsMenu.appendChild(rulesTitle);
+
+    const rulesList = document.createElement("div");
+    rulesList.className = "picker-list permission-list";
+    if (!permissionRules.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "保存済みルールはありません";
+      rulesList.appendChild(empty);
+    } else {
+      for (const rule of permissionRules) {
+        const row = document.createElement("div");
+        row.className = "permission-menu-row";
+        row.innerHTML = `
+          <span class="permission-menu-copy">
+            <span class="permission-menu-head">${escapeHtml(rule.headline || "ツール")}</span>
+            <span class="permission-menu-detail">${escapeHtml(rule.detail || "")}</span>
+          </span>
+          <button class="permission-menu-remove" type="button" title="削除">×</button>
+        `;
+        row.querySelector(".permission-menu-remove").addEventListener("click", () => {
+          vscode.postMessage({ type: "removePermissionRule", id: rule.id });
+        });
+        rulesList.appendChild(row);
+      }
+    }
+    permissionsMenu.appendChild(rulesList);
+
+    const historyTitle = document.createElement("div");
+    historyTitle.className = "permission-menu-title permission-menu-title-inline";
+    historyTitle.innerHTML = '<span>履歴</span><button class="permission-clear" type="button">消去</button>';
+    historyTitle.querySelector(".permission-clear").addEventListener("click", () => {
+      vscode.postMessage({ type: "clearPermissionHistory" });
+    });
+    permissionsMenu.appendChild(historyTitle);
+
+    const historyList = document.createElement("div");
+    historyList.className = "picker-list permission-list";
+    if (!permissionHistory.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "履歴はありません";
+      historyList.appendChild(empty);
+    } else {
+      for (const item of permissionHistory.slice(0, 12)) {
+        const row = document.createElement("div");
+        row.className = "permission-history-row";
+        const decision =
+          item.autoApproved ? "自動許可" :
+          item.decision === "reject-once" ? "拒否" :
+          item.decision === "allow-always" ? "常に許可" : "許可";
+        row.innerHTML = `
+          <span class="permission-menu-copy">
+            <span class="permission-menu-head">${escapeHtml(decision)} · ${escapeHtml(item.headline || "ツール")}</span>
+            <span class="permission-menu-detail">${escapeHtml(item.detail || "")}</span>
+          </span>
+          <span class="permission-menu-time">${escapeHtml(formatPermissionTime(item.createdAt))}</span>
+        `;
+        historyList.appendChild(row);
+      }
+    }
+    permissionsMenu.appendChild(historyList);
+  }
+
+  function renderChangesMenu() {
+    changesMenu.innerHTML = "";
+
+    const title = document.createElement("div");
+    title.className = "permission-menu-title permission-menu-title-inline";
+    title.innerHTML = '<span>変更レビュー</span><button class="permission-clear" type="button">消去</button>';
+    title.querySelector(".permission-clear").addEventListener("click", () => {
+      vscode.postMessage({ type: "clearChangeReview" });
+    });
+    changesMenu.appendChild(title);
+
+    const list = document.createElement("div");
+    list.className = "picker-list changes-list";
+    if (!changeReviewItems.length) {
+      const empty = document.createElement("div");
+      empty.className = "picker-empty";
+      empty.textContent = "まだ変更はありません";
+      list.appendChild(empty);
+    } else {
+      for (const item of changeReviewItems) {
+        const row = document.createElement("div");
+        row.className = "change-review-row";
+        row.innerHTML = `
+          <button class="change-review-main" type="button" title="差分を開く">
+            <span class="change-review-name">${escapeHtml(item.fileName || item.path)}</span>
+            <span class="change-review-detail">${formatEditStats(item.addedLines || 0, item.removedLines || 0)} · ${escapeHtml(item.status || "updated")}</span>
+          </button>
+          <span class="change-review-actions">
+            <button class="change-review-action" type="button" data-action="open">開く</button>
+            <button class="change-review-action" type="button" data-action="revert" ${item.canRevert ? "" : "disabled"}>戻す</button>
+          </span>
+        `;
+        row.querySelector(".change-review-main").addEventListener("click", () => {
+          vscode.postMessage({ type: "openDiff", path: item.path });
+        });
+        row.querySelector('[data-action="open"]').addEventListener("click", () => {
+          vscode.postMessage({ type: "openFile", path: item.path });
+        });
+        row.querySelector('[data-action="revert"]').addEventListener("click", () => {
+          vscode.postMessage({ type: "revertFile", path: item.path });
+        });
+        list.appendChild(row);
+      }
+    }
+    changesMenu.appendChild(list);
+  }
+
   function renderModeMenu() {
     if (!sessionConfig?.modes?.length) {
       modeMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
@@ -441,28 +708,26 @@
     }
   }
 
-  function renderModelMenu(filter) {
+  function updateModelMenuList(filter) {
     if (!sessionConfig?.models?.length) {
       modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
       return;
     }
+
     const query = (filter || "").trim().toLowerCase();
-    modelMenu.innerHTML = "";
+    let list = modelMenu.querySelector(".picker-list");
+    if (!list) {
+      list = document.createElement("div");
+      list.className = "picker-list";
+      modelMenu.appendChild(list);
+    }
 
-    const search = document.createElement("input");
-    search.type = "text";
-    search.className = "picker-search";
-    search.placeholder = "Search models";
-    search.value = filter || "";
-    search.addEventListener("input", () => renderModelMenu(search.value));
-    search.addEventListener("keydown", (e) => e.stopPropagation());
-    modelMenu.appendChild(search);
-
-    const list = document.createElement("div");
-    list.className = "picker-list";
+    list.innerHTML = "";
 
     const models = sessionConfig.models.filter((m) => {
-      if (!query) return true;
+      if (!query) {
+        return true;
+      }
       return m.name.toLowerCase().includes(query) || m.id.toLowerCase().includes(query);
     });
 
@@ -472,7 +737,7 @@
       btn.className = "picker-item" + (model.id === sessionConfig.currentModelId ? " is-selected" : "");
       btn.innerHTML = `
         <span class="picker-item-body">
-          <span class="picker-item-title">${model.name}</span>
+          <span class="picker-item-title">${escapeHtml(model.name)}</span>
         </span>
         ${model.id === sessionConfig.currentModelId ? '<span class="picker-check">✓</span>' : ""}
       `;
@@ -491,8 +756,26 @@
       empty.textContent = "No models found";
       list.appendChild(empty);
     }
+  }
 
-    modelMenu.appendChild(list);
+  function renderModelMenu(filter) {
+    modelMenu.innerHTML = "";
+
+    if (!sessionConfig?.models?.length) {
+      modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
+      return;
+    }
+
+    const search = document.createElement("input");
+    search.type = "text";
+    search.className = "picker-search";
+    search.placeholder = "Search models";
+    search.value = filter || "";
+    search.addEventListener("input", () => updateModelMenuList(search.value));
+    search.addEventListener("keydown", (e) => e.stopPropagation());
+    modelMenu.appendChild(search);
+
+    updateModelMenuList(filter || "");
   }
 
   function toggleMenu(menuName) {
@@ -518,6 +801,16 @@
       renderHistoryMenu();
       historyMenu.classList.remove("hidden");
       positionMenu(historyMenu, historyBtn, "below");
+    } else if (menuName === "changes") {
+      vscode.postMessage({ type: "requestChangeReview" });
+      renderChangesMenu();
+      changesMenu.classList.remove("hidden");
+      positionMenu(changesMenu, changesBtn, "below");
+    } else if (menuName === "permissions") {
+      vscode.postMessage({ type: "requestPermissionState" });
+      renderPermissionMenu();
+      permissionsMenu.classList.remove("hidden");
+      positionMenu(permissionsMenu, permissionsBtn, "below");
     }
   }
 
@@ -677,82 +970,102 @@
     }
   });
 
-  // ── 軽量シンタックスハイライト ──
-  const KEYWORD_RE = new RegExp(
-    "\\b(" +
-      [
-        "const", "let", "var", "function", "return", "if", "else", "elif", "for", "while",
-        "do", "switch", "case", "default", "break", "continue", "class", "struct", "enum",
-        "interface", "type", "extends", "implements", "new", "this", "super", "import",
-        "export", "from", "as", "async", "await", "try", "catch", "finally", "throw",
-        "throws", "yield", "in", "of", "is", "not", "and", "or", "def", "lambda", "pass",
-        "with", "raise", "fn", "mut", "impl", "use", "pub", "match", "func", "package",
-        "go", "void", "int", "float", "double", "bool", "boolean", "string", "char",
-        "null", "nil", "None", "undefined", "true", "false", "True", "False", "public",
-        "private", "protected", "static", "final", "abstract", "override", "virtual",
-        "namespace", "using", "echo", "then", "fi", "done", "esac", "select", "where",
-      ].join("|") +
-      ")\\b",
-    "g"
-  );
-
-  function commentPattern(lang) {
-    const l = (lang || "").toLowerCase();
-    if (
-      ["py", "python", "rb", "ruby", "sh", "bash", "shell", "zsh", "yaml", "yml",
-        "toml", "ini", "dockerfile", "makefile", "ps1", "powershell", "r", "perl"].includes(l)
-    ) {
-      return "#[^\\n]*";
-    }
-    if (["html", "xml", "svg", "vue"].includes(l)) {
-      return "<!--[\\s\\S]*?-->";
-    }
-    if (l === "sql") {
-      return "--[^\\n]*";
-    }
-    if (
-      ["js", "ts", "jsx", "tsx", "javascript", "typescript", "java", "c", "cpp", "cs",
-        "csharp", "go", "rust", "php", "swift", "kotlin", "scala", "css", "scss", "less",
-        "json", "jsonc"].includes(l)
-    ) {
-      return "\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/";
-    }
-    // 言語不明: 主要なコメント記法をまとめて対象にする
-    return "\\/\\/[^\\n]*|\\/\\*[\\s\\S]*?\\*\\/|#[^\\n]*";
-  }
-
-  function highlightPlain(text) {
+  function renderInlineMarkdown(text) {
     let html = escapeHtml(text);
-    html = html.replace(KEYWORD_RE, '<span class="tok-keyword">$1</span>');
-    html = html.replace(
-      /\b(0x[\da-fA-F]+|\d[\d_]*(?:\.\d+)?)\b/g,
-      '<span class="tok-number">$1</span>'
-    );
+    html = html.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
+    html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    html = html.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a class="md-link" href="$2">$1</a>');
     return html;
   }
 
-  function highlightCode(code, lang) {
-    // コメント・文字列を先に確定し、残りにキーワード・数値を適用する
-    const re = new RegExp(
-      "(" + commentPattern(lang) + ")" +
-        "|(\"(?:\\\\.|[^\"\\\\\\n])*\"|'(?:\\\\.|[^'\\\\\\n])*'|`(?:\\\\.|[^`\\\\])*`)",
-      "g"
-    );
-    let out = "";
-    let last = 0;
-    let m;
-    while ((m = re.exec(code))) {
-      out += highlightPlain(code.slice(last, m.index));
-      const cls = m[1] !== undefined ? "tok-comment" : "tok-string";
-      out += `<span class="${cls}">${escapeHtml(m[0])}</span>`;
-      last = re.lastIndex;
-    }
-    out += highlightPlain(code.slice(last));
-    return out;
+  function normalizeCodeLanguage(raw) {
+    const lang = (raw || "").trim().toLowerCase();
+    const aliases = {
+      javascript: "js",
+      typescript: "ts",
+      jsx: "jsx",
+      tsx: "tsx",
+      jsonc: "json",
+      shell: "sh",
+      bash: "sh",
+      zsh: "sh",
+      markdown: "md",
+    };
+    return aliases[lang] || lang;
   }
 
-  // ── テーブル ──
-  function splitTableRow(line) {
+  function highlightCode(code, rawLanguage) {
+    const language = normalizeCodeLanguage(rawLanguage);
+    const placeholders = [];
+    let html = escapeHtml(code);
+
+    function placeholderKey(index) {
+      let value = "";
+      let current = index;
+      do {
+        value = String.fromCharCode(65 + (current % 26)) + value;
+        current = Math.floor(current / 26) - 1;
+      } while (current >= 0);
+      return `@@HL_${value}@@`;
+    }
+
+    function stash(className, value) {
+      const token = placeholderKey(placeholders.length);
+      placeholders.push(`<span class="${className}">${value}</span>`);
+      return token;
+    }
+
+    html = html.replace(/(&quot;(?:\\.|[^&])*?&quot;|'(?:\\.|[^'])*?'|`(?:\\.|[^`])*?`)/g, (match) =>
+      stash("tok-string", match)
+    );
+
+    if (["js", "jsx", "ts", "tsx", "css", "scss"].includes(language)) {
+      html = html.replace(/(\/\*[\s\S]*?\*\/)/g, (match) => stash("tok-comment", match));
+    }
+    if (["js", "jsx", "ts", "tsx"].includes(language)) {
+      html = html.replace(/(\/\/[^\n]*)/g, (match) => stash("tok-comment", match));
+    }
+    if (["sh", "bash"].includes(language)) {
+      html = html.replace(/(#[^\n]*)/g, (match) => stash("tok-comment", match));
+    }
+
+    if (["js", "jsx", "ts", "tsx"].includes(language)) {
+      html = html.replace(
+        /\b(import|export|from|const|let|var|function|return|if|else|for|while|switch|case|break|continue|class|extends|new|async|await|try|catch|finally|throw|type|interface|enum|implements|public|private|protected|readonly|static|of|in|as)\b/g,
+        '<span class="tok-keyword">$1</span>'
+      );
+      html = html.replace(/\b(true|false|null|undefined|this|super)\b/g, '<span class="tok-literal">$1</span>');
+    } else if (language === "json") {
+      html = html.replace(/(&quot;[^&]+&quot;)(\s*:)/g, '<span class="tok-property">$1</span>$2');
+      html = html.replace(/\b(true|false|null)\b/g, '<span class="tok-literal">$1</span>');
+    } else if (["css", "scss"].includes(language)) {
+      html = html.replace(/([.#]?[a-zA-Z_-][\w-]*)(\s*\{)/g, '<span class="tok-selector">$1</span>$2');
+      html = html.replace(/([a-zA-Z-]+)(\s*:)/g, '<span class="tok-property">$1</span>$2');
+    } else if (["sh", "bash"].includes(language)) {
+      html = html.replace(/\b(if|then|else|fi|for|do|done|case|esac|while|function|export|local|return|set)\b/g, '<span class="tok-keyword">$1</span>');
+    } else if (language === "mermaid") {
+      html = html.replace(
+        /\b(sequenceDiagram|flowchart|graph|participant|actor|as|note|over|right|left|of|loop|alt|else|opt|par|and|end|classDiagram|stateDiagram|erDiagram|gantt|pie|journey)\b/g,
+        '<span class="tok-keyword">$1</span>'
+      );
+      html = html.replace(/(--&gt;|--&gt;&gt;|-&gt;&gt;|--|---|==&gt;|-\.-&gt;)/g, '<span class="tok-operator">$1</span>');
+    }
+
+    html = html.replace(/\b(\d+(?:\.\d+)?)\b/g, '<span class="tok-number">$1</span>');
+
+    placeholders.forEach((value, index) => {
+      html = html.replace(placeholderKey(index), value);
+    });
+
+    return html;
+  }
+
+  function isTableSeparator(line) {
+    return /^\s*\|?(?:\s*:?-+:?\s*\|)+\s*:?-+:?\s*\|?\s*$/.test(line);
+  }
+
+  function parseTableRow(line) {
     return line
       .trim()
       .replace(/^\|/, "")
@@ -761,117 +1074,153 @@
       .map((cell) => cell.trim());
   }
 
-  function isTableSeparator(line) {
-    if (!line || !line.includes("|") || !line.includes("-")) return false;
-    const cells = splitTableRow(line);
-    return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell));
+  function isBlockStart(lines, index) {
+    const line = lines[index];
+    if (!line?.trim()) {
+      return false;
+    }
+    if (line.trim().startsWith("```")) {
+      return true;
+    }
+    if (/^#{1,6}\s+/.test(line)) {
+      return true;
+    }
+    if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
+      return true;
+    }
+    if (/^\s*[-*+]\s+/.test(line)) {
+      return true;
+    }
+    if (/^\s*\d+\.\s+/.test(line)) {
+      return true;
+    }
+    if (/^\s*>\s?/.test(line)) {
+      return true;
+    }
+    if (line.includes("|") && index + 1 < lines.length && isTableSeparator(lines[index + 1])) {
+      return true;
+    }
+    return false;
   }
 
   function renderMarkdown(text) {
-    // フェンス付きコードブロックを退避してから全体をエスケープする
-    const codeBlocks = [];
-    const work = text.replace(/```([\w.+#-]*)\n?([\s\S]*?)```/g, (_, lang, code) => {
-      const idx = codeBlocks.push({ lang, code: code.replace(/\n$/, "") }) - 1;
-      return `\u0000CODE${idx}\u0000`;
-    });
-
-    let html = escapeHtml(work);
-
-    // インライン要素
-    html = html.replace(/`([^`\n]+)`/g, '<code class="inline-code">$1</code>');
-    html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-    html = html.replace(
-      /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
-      '<a href="$2" title="$2">$1</a>'
-    );
-
-    // 行単位の要素（テーブル・見出し・リスト・区切り線）
+    const lines = text.replace(/\r\n/g, "\n").split("\n");
     const out = [];
-    const lines = html.split("\n");
     let i = 0;
+
     while (i < lines.length) {
       const line = lines[i];
 
-      // テーブル: ヘッダー行 + 区切り行（|---|---|）で始まるブロック
-      if (/^\s*\|.*\|\s*$/.test(line) && isTableSeparator(lines[i + 1])) {
-        const headers = splitTableRow(line);
-        const aligns = splitTableRow(lines[i + 1]).map((cell) => {
-          if (/^:-+:$/.test(cell)) return "center";
-          if (/^-+:$/.test(cell)) return "right";
-          return "";
-        });
+      if (line.trim().startsWith("```")) {
+        const fence = line.trim().match(/^```(\S*)/);
+        const language = normalizeCodeLanguage(fence?.[1] || "");
+        const chunks = [];
+        i += 1;
+        while (i < lines.length && !lines[i].trim().startsWith("```")) {
+          chunks.push(lines[i]);
+          i += 1;
+        }
+        const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
+        out.push(
+          `<div class="code-wrap"><pre class="code-block"${langAttr}><code>${highlightCode(chunks.join("\n"), language)}</code></pre>` +
+            `<button class="copy-btn code-copy" type="button" title="コピー">${COPY_ICON}</button></div>`
+        );
+        i += 1;
+        continue;
+      }
+
+      if (line.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+        const headerCells = parseTableRow(line);
         i += 2;
         const bodyRows = [];
-        while (i < lines.length && /^\s*\|/.test(lines[i])) {
-          bodyRows.push(splitTableRow(lines[i]));
-          i++;
+        while (i < lines.length && lines[i].includes("|") && lines[i].trim() && !isTableSeparator(lines[i])) {
+          bodyRows.push(parseTableRow(lines[i]));
+          i += 1;
         }
-        const alignAttr = (idx) => (aligns[idx] ? ` style="text-align:${aligns[idx]}"` : "");
-        let table = '<div class="table-wrap"><table class="md-table"><thead><tr>';
-        headers.forEach((h, idx) => {
-          table += `<th${alignAttr(idx)}>${h}</th>`;
-        });
-        table += "</tr></thead>";
-        if (bodyRows.length) {
-          table += "<tbody>";
-          for (const row of bodyRows) {
-            table += "<tr>";
-            headers.forEach((_, idx) => {
-              table += `<td${alignAttr(idx)}>${row[idx] ?? ""}</td>`;
-            });
-            table += "</tr>";
+
+        let table = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+        for (const cell of headerCells) {
+          table += `<th>${renderInlineMarkdown(cell)}</th>`;
+        }
+        table += "</tr></thead><tbody>";
+        for (const row of bodyRows) {
+          table += "<tr>";
+          for (let c = 0; c < headerCells.length; c += 1) {
+            table += `<td>${renderInlineMarkdown(row[c] || "")}</td>`;
           }
-          table += "</tbody>";
+          table += "</tr>";
         }
-        table += "</table></div>";
+        table += "</tbody></table></div>";
         out.push(table);
         continue;
       }
 
-      i++;
+      const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+      if (headingMatch) {
+        const level = headingMatch[1].length;
+        out.push(
+          `<h${level} class="md-heading md-h${level}">${renderInlineMarkdown(headingMatch[2])}</h${level}>`
+        );
+        i += 1;
+        continue;
+      }
 
-      const heading = line.match(/^(#{1,4})\s+(.*)$/);
-      if (heading) {
-        out.push(`<div class="md-h md-h${heading[1].length}">${heading[2]}</div>`);
-        continue;
-      }
-      const bullet = line.match(/^(\s*)[-*]\s+(.*)$/);
-      if (bullet) {
-        const indent = Math.min(Math.floor(bullet[1].length / 2), 3) * 14;
-        out.push(
-          `<div class="md-li" style="margin-left:${indent}px"><span class="md-bullet"></span><span>${bullet[2]}</span></div>`
-        );
-        continue;
-      }
-      const numbered = line.match(/^(\s*)(\d+)[.)]\s+(.*)$/);
-      if (numbered) {
-        const indent = Math.min(Math.floor(numbered[1].length / 2), 3) * 14;
-        out.push(
-          `<div class="md-li" style="margin-left:${indent}px"><span class="md-num">${numbered[2]}.</span><span>${numbered[3]}</span></div>`
-        );
-        continue;
-      }
-      if (/^\s*(?:---+|\*\*\*+)\s*$/.test(line)) {
+      if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
         out.push('<hr class="md-hr">');
+        i += 1;
         continue;
       }
-      out.push(line === "" ? '<div class="md-space"></div>' : `<div class="md-p">${line}</div>`);
+
+      if (/^\s*[-*+]\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
+          i += 1;
+        }
+        out.push(
+          `<ul class="md-list">${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`
+        );
+        continue;
+      }
+
+      if (/^\s*\d+\.\s+/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
+          i += 1;
+        }
+        out.push(
+          `<ol class="md-list">${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ol>`
+        );
+        continue;
+      }
+
+      if (/^\s*>\s?/.test(line)) {
+        const items = [];
+        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+          items.push(lines[i].replace(/^\s*>\s?/, ""));
+          i += 1;
+        }
+        out.push(`<blockquote class="md-quote">${renderInlineMarkdown(items.join(" "))}</blockquote>`);
+        continue;
+      }
+
+      if (!line.trim()) {
+        i += 1;
+        continue;
+      }
+
+      const paraLines = [];
+      while (i < lines.length && lines[i].trim() && !isBlockStart(lines, i)) {
+        paraLines.push(lines[i]);
+        i += 1;
+      }
+      if (paraLines.length) {
+        out.push(`<p class="md-paragraph">${renderInlineMarkdown(paraLines.join(" "))}</p>`);
+      }
     }
-    html = out.join("");
 
-    // コードブロックを復元
-    html = html.replace(/\u0000CODE(\d+)\u0000/g, (_, i) => {
-      const block = codeBlocks[Number(i)];
-      const lang = block.lang ? `<span class="code-lang">${escapeHtml(block.lang)}</span>` : "<span></span>";
-      return (
-        '<div class="code-wrap"><div class="code-head">' +
-        lang +
-        `<button class="copy-btn code-copy" type="button" title="コピー">${COPY_ICON}</button>` +
-        `</div><pre class="code-block"><code>${highlightCode(block.code, block.lang)}</code></pre></div>`
-      );
-    });
-
-    return html;
+    return out.join("");
   }
 
   function renderAssistantContent(el) {
@@ -893,20 +1242,146 @@
     el.classList.add("rendered");
   }
 
-  function appendUserMessage(text) {
+  function appendUserMessage(text, images) {
     const turn = ensureTurn("user");
     const label = document.createElement("div");
     label.className = "turn-label";
     label.textContent = "You";
-    const el = document.createElement("div");
-    el.className = "user-text";
-    el.textContent = text;
+
+    const body = document.createElement("div");
+    body.className = "user-message-body";
+
+    if (text) {
+      const el = document.createElement("div");
+      el.className = "user-text";
+      el.textContent = text;
+      body.appendChild(el);
+    }
+
+    if (images?.length) {
+      const gallery = document.createElement("div");
+      gallery.className = "user-images";
+      for (const image of images) {
+        const img = document.createElement("img");
+        img.className = "user-image";
+        img.src = `data:${image.mimeType};base64,${image.data}`;
+        img.alt = "Attached image";
+        gallery.appendChild(img);
+      }
+      body.appendChild(gallery);
+    }
+
     turn.appendChild(label);
-    turn.appendChild(el);
+    turn.appendChild(body);
     // 自分の送信時は必ず最下部に移動して追従を再開する
     stickToBottom = true;
     jumpBottom.classList.add("hidden");
     scrollToBottom(true);
+  }
+
+  function readFileAsDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(reader.error ?? new Error("Failed to read image"));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  function showAttachmentError(message) {
+    if (!attachmentTray) {
+      return;
+    }
+    attachmentTray.classList.remove("hidden");
+    let errorEl = attachmentTray.querySelector(".attachment-error");
+    if (!errorEl) {
+      errorEl = document.createElement("div");
+      errorEl.className = "attachment-error";
+      attachmentTray.prepend(errorEl);
+    }
+    errorEl.textContent = message;
+  }
+
+  function clearAttachmentError() {
+    attachmentTray?.querySelector(".attachment-error")?.remove();
+  }
+
+  function renderAttachmentTray() {
+    if (!attachmentTray) {
+      return;
+    }
+
+    clearAttachmentError();
+    attachmentTray.querySelectorAll(".attachment-chip").forEach((node) => node.remove());
+
+    if (pendingAttachments.length === 0) {
+      attachmentTray.classList.add("hidden");
+      return;
+    }
+
+    attachmentTray.classList.remove("hidden");
+    for (const attachment of pendingAttachments) {
+      const chip = document.createElement("div");
+      chip.className = "attachment-chip";
+      chip.dataset.id = attachment.id;
+
+      const preview = document.createElement("img");
+      preview.src = attachment.dataUrl;
+      preview.alt = attachment.name || "Attached image";
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "attachment-remove";
+      removeBtn.setAttribute("aria-label", "Remove image");
+      removeBtn.textContent = "×";
+      removeBtn.addEventListener("click", () => {
+        pendingAttachments = pendingAttachments.filter((item) => item.id !== attachment.id);
+        renderAttachmentTray();
+      });
+
+      chip.appendChild(preview);
+      chip.appendChild(removeBtn);
+      attachmentTray.appendChild(chip);
+    }
+  }
+
+  async function addAttachmentFromFile(file) {
+    if (!file || !ALLOWED_IMAGE_TYPES.has(file.type)) {
+      return;
+    }
+    if (file.size > MAX_IMAGE_BYTES) {
+      showAttachmentError("画像は 5MB 以下にしてください");
+      return;
+    }
+    if (pendingAttachments.length >= MAX_IMAGE_ATTACHMENTS) {
+      showAttachmentError(`画像は最大 ${MAX_IMAGE_ATTACHMENTS} 枚までです`);
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      pendingAttachments.push({
+        id: String(++attachmentIdCounter),
+        mimeType: file.type === "image/jpg" ? "image/jpeg" : file.type,
+        dataUrl,
+        name: file.name || "image",
+      });
+      renderAttachmentTray();
+    } catch {
+      showAttachmentError("画像の読み込みに失敗しました");
+    }
+  }
+
+  function getAttachmentsForSend() {
+    return pendingAttachments.map((attachment) => ({
+      mimeType: attachment.mimeType,
+      data: attachment.dataUrl.replace(/^data:[^;]+;base64,/, ""),
+    }));
+  }
+
+  function clearAttachments() {
+    pendingAttachments = [];
+    renderAttachmentTray();
   }
 
   function ensureAssistantTurn() {
@@ -1114,17 +1589,59 @@
 
   function sendMessage() {
     const text = inputEl.value.trim();
-    if (!text || busy) return;
+    if ((!text && pendingAttachments.length === 0) || busy) {
+      return;
+    }
     closeSuggestMenu();
-    vscode.postMessage({ type: "send", text });
+    vscode.postMessage({ type: "send", text, images: getAttachmentsForSend() });
     inputEl.value = "";
+    renderContextPreview([]);
+    clearAttachments();
     inputEl.style.height = "auto";
   }
 
   sendBtn.addEventListener("click", sendMessage);
   stopBtn.addEventListener("click", requestCancel);
 
+  inputEl.addEventListener("paste", (e) => {
+    const items = e.clipboardData?.items;
+    if (!items) {
+      return;
+    }
+
+    const imageFiles = [];
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file) {
+          imageFiles.push(file);
+        }
+      }
+    }
+
+    if (imageFiles.length === 0) {
+      return;
+    }
+
+    e.preventDefault();
+    void (async () => {
+      for (const file of imageFiles) {
+        await addAttachmentFromFile(file);
+      }
+    })();
+  });
+
+  inputEl.addEventListener("compositionstart", () => {
+    isComposing = true;
+  });
+  inputEl.addEventListener("compositionend", () => {
+    isComposing = false;
+  });
+
   inputEl.addEventListener("keydown", (e) => {
+    if (e.isComposing || isComposing) {
+      return;
+    }
     if (suggestState && suggestMenu && !suggestMenu.classList.contains("hidden")) {
       if (e.key === "ArrowDown") {
         e.preventDefault();
@@ -1168,6 +1685,7 @@
     inputEl.style.height = "auto";
     inputEl.style.height = `${Math.min(inputEl.scrollHeight, 140)}px`;
     updateSuggestFromInput();
+    queueContextPreview();
   });
 
   inputEl.addEventListener("click", updateSuggestFromInput);
@@ -1188,6 +1706,21 @@
     toggleMenu("history");
   });
 
+  usageBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    vscode.postMessage({ type: "openUsageDashboard" });
+  });
+
+  changesBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleMenu("changes");
+  });
+
+  permissionsBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleMenu("permissions");
+  });
+
   modePill.addEventListener("click", (e) => {
     e.stopPropagation();
     toggleMenu("mode");
@@ -1204,9 +1737,23 @@
     vscode.postMessage({ type: "setAutoApprove", enabled: !autoApproveEnabled });
   });
 
+  retryConnectBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "retryConnect" });
+  });
+
+  diagnoseBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "runDiagnostics" });
+  });
+
+  openSettingsBtn.addEventListener("click", () => {
+    vscode.postMessage({ type: "openSettings" });
+  });
+
   modeMenu.addEventListener("click", (e) => e.stopPropagation());
   modelMenu.addEventListener("click", (e) => e.stopPropagation());
   historyMenu.addEventListener("click", (e) => e.stopPropagation());
+  changesMenu.addEventListener("click", (e) => e.stopPropagation());
+  permissionsMenu.addEventListener("click", (e) => e.stopPropagation());
 
   suggestMenu.addEventListener("mousedown", (e) => e.stopPropagation());
 
@@ -1242,6 +1789,8 @@
       case "clear":
         threadEl.innerHTML = "";
         resetTurnState();
+        clearAttachments();
+        renderContextPreview([]);
         setRunning(false, false);
         dismissPermissionCards();
         stickToBottom = true;
@@ -1249,7 +1798,7 @@
         break;
 
       case "userMessage":
-        appendUserMessage(msg.text);
+        appendUserMessage(msg.text || "", msg.images);
         break;
 
       case "assistantStart":
@@ -1312,6 +1861,14 @@
         upsertFileEditCard(msg);
         break;
 
+      case "changeReview":
+        changeReviewItems = msg.items || [];
+        changesBtn.classList.toggle("has-items", changeReviewItems.length > 0);
+        if (openMenu === "changes") {
+          renderChangesMenu();
+        }
+        break;
+
       case "cancelled": {
         dismissPermissionCards();
         finalizeToolPanel();
@@ -1346,6 +1903,10 @@
         setBootState(msg.status, msg.message);
         break;
 
+      case "diagnostics":
+        renderDiagnostics(msg.results, msg.running);
+        break;
+
       case "sessions":
         sessions = msg.sessions || [];
         currentSessionId = msg.currentSessionId || null;
@@ -1367,13 +1928,37 @@
 
       case "sessionLoaded":
         document.getElementById("sessionLoading")?.remove();
+        if (msg.emptyHistory) {
+          const note = document.createElement("div");
+          note.className = "system-note";
+          note.innerHTML =
+            '<span class="system-note-text">このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。</span>';
+          threadEl.appendChild(note);
+        }
         stickToBottom = true;
         scrollToBottom(true);
         break;
 
+      case "system": {
+        const note = document.createElement("div");
+        note.className = "system-note";
+        note.innerHTML = `<span class="system-note-text">${escapeHtml(msg.text || "")}</span>`;
+        threadEl.appendChild(note);
+        scrollToBottom();
+        break;
+      }
+
       case "settings":
         if (typeof msg.autoApprovePermissions === "boolean") {
           applyAutoRun(msg.autoApprovePermissions);
+        }
+        break;
+
+      case "permissionState":
+        permissionRules = msg.rules || [];
+        permissionHistory = msg.history || [];
+        if (openMenu === "permissions") {
+          renderPermissionMenu();
         }
         break;
 
@@ -1406,6 +1991,12 @@
         }
         break;
       }
+
+      case "contextPreview":
+        if (msg.text === contextPreviewText) {
+          renderContextPreview(msg.items || [], msg.error);
+        }
+        break;
 
       case "config":
         applyConfig(msg);

@@ -10,6 +10,10 @@ import {
 
 export type AgentMode = "agent" | "plan" | "ask";
 
+export type PromptContentBlock =
+  | { type: "text"; text: string }
+  | { type: "image"; mimeType: string; data: string };
+
 export interface AcpClientOptions {
   agentPath: string;
   cwd: string;
@@ -211,16 +215,20 @@ export class AcpClient extends EventEmitter {
     return parseConfigOptions(result.configOptions);
   }
 
-  async prompt(text: string): Promise<{ stopReason: string }> {
+  async prompt(blocks: PromptContentBlock[]): Promise<{ stopReason: string }> {
     if (!this.sessionId) {
       await this.newSession();
+    }
+
+    if (blocks.length === 0) {
+      throw new Error("prompt must include at least one content block");
     }
 
     this.running = true;
     try {
       const result = (await this.send("session/prompt", {
         sessionId: this.sessionId,
-        prompt: [{ type: "text", text }],
+        prompt: blocks,
       })) as { stopReason: string };
 
       return result;

@@ -1,24 +1,38 @@
 import * as fs from "node:fs/promises";
+import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { AcpClient, AgentMode } from "./acpClient";
 import { AcpSessionInfo, formatModelDisplayName, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
-import { buildPromptText } from "./promptBuilder";
+import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
+import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
 import { FileEditCardData, parseToolUpdate } from "./toolCallParser";
 
 type WebviewMessage =
-  | { type: "send"; text: string }
+  | { type: "send"; text: string; images?: PromptImageAttachment[] }
   | { type: "requestSuggestions"; kind: "file" | "slash"; query: string }
+  | { type: "requestContextPreview"; text: string }
   | { type: "newChat" }
   | { type: "cancel" }
   | { type: "setMode"; modeId: AgentMode }
   | { type: "setModel"; modelId: string }
   | { type: "permissionResponse"; id: string; decision: string }
+  | { type: "requestPermissionState" }
+  | { type: "removePermissionRule"; id: string }
+  | { type: "clearPermissionHistory" }
   | { type: "openFile"; path: string; line?: number }
+  | { type: "openDiff"; path: string }
+  | { type: "revertFile"; path: string }
+  | { type: "requestChangeReview" }
+  | { type: "clearChangeReview" }
   | { type: "selectSession"; sessionId: string }
   | { type: "setAutoApprove"; enabled: boolean }
   | { type: "refreshSessions" }
+  | { type: "retryConnect" }
+  | { type: "openSettings" }
+  | { type: "openUsageDashboard" }
+  | { type: "runDiagnostics" }
   | { type: "ready" };
 
 interface PermissionPresentation {
@@ -27,11 +41,119 @@ interface PermissionPresentation {
   icon: string;
 }
 
+interface PermissionRequestState {
+  resolve: (decision: string) => void;
+  title: string;
+  kind?: string;
+  presentation: PermissionPresentation;
+}
+
+interface PermissionRule {
+  id: string;
+  headline: string;
+  detail: string;
+  kind?: string;
+  createdAt: string;
+}
+
+interface PermissionHistoryItem {
+  id: string;
+  headline: string;
+  detail: string;
+  decision: string;
+  autoApproved: boolean;
+  createdAt: string;
+}
+
+interface ChangeReviewItem {
+  path: string;
+  fileName: string;
+  status: string;
+  addedLines: number;
+  removedLines: number;
+  previewLines: FileEditCardData["previewLines"];
+  previousText?: string | null;
+  canRevert: boolean;
+  updatedAt: string;
+}
+
 const MODE_ICONS: Record<AgentMode, string> = {
   agent: "∞",
   plan: "☰",
   ask: "?",
 };
+
+const ALLOWED_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+const MAX_IMAGE_ATTACHMENTS = 4;
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+interface DiagnosticResult {
+  label: string;
+  ok: boolean;
+  output: string;
+}
+
+function sanitizeImageAttachments(images: PromptImageAttachment[] | undefined): PromptImageAttachment[] {
+  if (!images?.length) {
+    return [];
+  }
+
+  const sanitized: PromptImageAttachment[] = [];
+  for (const image of images.slice(0, MAX_IMAGE_ATTACHMENTS)) {
+    const mimeType = image.mimeType === "image/jpg" ? "image/jpeg" : image.mimeType;
+    if (!ALLOWED_IMAGE_MIME_TYPES.has(mimeType) || typeof image.data !== "string") {
+      continue;
+    }
+
+    const data = image.data.replace(/\s/g, "");
+    if (!data) {
+      continue;
+    }
+
+    const bytes = Buffer.byteLength(data, "base64");
+    if (bytes <= 0 || bytes > MAX_IMAGE_BYTES) {
+      continue;
+    }
+
+    sanitized.push({ mimeType, data });
+  }
+
+  return sanitized;
+}
+
+function extractUpdateText(content: unknown): string | undefined {
+  if (typeof content === "string") {
+    return content.length > 0 ? content : undefined;
+  }
+  if (!content) {
+    return undefined;
+  }
+  if (Array.isArray(content)) {
+    const parts: string[] = [];
+    for (const block of content) {
+      const text = extractUpdateText(block);
+      if (text) {
+        parts.push(text);
+      }
+    }
+    return parts.length > 0 ? parts.join("") : undefined;
+  }
+  if (typeof content === "object" && "text" in content) {
+    const text = (content as { text?: unknown }).text;
+    if (typeof text === "string" && text.length > 0) {
+      return text;
+    }
+  }
+  return undefined;
+}
+
+function isUserMessageUpdate(sessionUpdate: string | undefined): boolean {
+  return sessionUpdate === "user_message_chunk" || sessionUpdate === "user_message";
+}
+
+function isAgentMessageUpdate(sessionUpdate: string | undefined): boolean {
+  return sessionUpdate === "agent_message_chunk" || sessionUpdate === "agent_message";
+}
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -41,11 +163,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private mode: AgentMode = "agent";
   private modelId = "default[]";
   private sessionConfig?: SessionPickerConfig;
-  private permissionRequests = new Map<string, (decision: string) => void>();
+  private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
   private fileEdits = new Map<string, FileEditCardData>();
+  private changeReviewItems = new Map<string, ChangeReviewItem>();
   private workspaceRoot = "";
   private replayAssistantOpen = false;
+  private replayingSession = false;
+  private replayBuffer: Record<string, unknown>[] = [];
   private connectPromise?: Promise<void>;
   private connectEpoch = 0;
   private configSubscription?: vscode.Disposable;
@@ -78,10 +203,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.ensureClient();
           break;
         case "send":
-          await this.handleSend(msg.text);
+          await this.handleSend(msg.text, msg.images);
           break;
         case "requestSuggestions":
           await this.handleRequestSuggestions(msg.kind, msg.query);
+          break;
+        case "requestContextPreview":
+          await this.handleRequestContextPreview(msg.text);
           break;
         case "newChat":
           await this.handleNewChat();
@@ -96,10 +224,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           await this.handleSetModel(msg.modelId);
           break;
         case "permissionResponse":
-          this.resolvePermission(msg.id, msg.decision);
+          await this.resolvePermission(msg.id, msg.decision);
+          break;
+        case "requestPermissionState":
+          this.postPermissionState();
+          break;
+        case "removePermissionRule":
+          await this.removePermissionRule(msg.id);
+          break;
+        case "clearPermissionHistory":
+          await this.clearPermissionHistory();
           break;
         case "openFile":
           await this.openFile(msg.path, msg.line);
+          break;
+        case "openDiff":
+          await this.openDiff(msg.path);
+          break;
+        case "revertFile":
+          await this.revertFile(msg.path);
+          break;
+        case "requestChangeReview":
+          this.postChangeReview();
+          break;
+        case "clearChangeReview":
+          this.changeReviewItems.clear();
+          this.postChangeReview();
           break;
         case "selectSession":
           await this.handleSelectSession(msg.sessionId);
@@ -109,6 +259,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "refreshSessions":
           await this.refreshSessions();
+          break;
+        case "retryConnect":
+          await this.handleRetryConnect();
+          break;
+        case "openSettings":
+          await vscode.commands.executeCommand("workbench.action.openSettings", "cursorAgent.agentPath");
+          break;
+        case "openUsageDashboard":
+          await vscode.env.openExternal(vscode.Uri.parse("https://cursor.com/dashboard/spending"));
+          break;
+        case "runDiagnostics":
+          await this.handleRunDiagnostics();
           break;
       }
     });
@@ -261,6 +423,89 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleRetryConnect(): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+
+    this.connectEpoch++;
+    this.connectPromise = undefined;
+    this.client?.dispose();
+    this.client = undefined;
+    this.sessionConfig = undefined;
+    await this.ensureClient().catch(() => undefined);
+  }
+
+  private async handleRunDiagnostics(): Promise<void> {
+    const config = vscode.workspace.getConfiguration("cursorAgent");
+    const agentPath = config.get<string>("agentPath", "agent");
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+
+    this.post({
+      type: "diagnostics",
+      running: true,
+      results: [{ label: "診断", ok: true, output: "Cursor CLI を確認中..." }],
+    });
+
+    const results = await Promise.all([
+      this.runAgentDiagnostic(agentPath, cwd, ["--version"], "agent --version"),
+      this.runAgentDiagnostic(agentPath, cwd, ["status"], "agent status"),
+    ]);
+
+    this.post({ type: "diagnostics", running: false, results });
+  }
+
+  private runAgentDiagnostic(
+    agentPath: string,
+    cwd: string,
+    args: string[],
+    label: string
+  ): Promise<DiagnosticResult> {
+    return new Promise((resolve) => {
+      const child = spawn(agentPath, args, {
+        cwd,
+        shell: process.platform === "win32",
+        env: { ...process.env },
+      });
+
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      const timer = setTimeout(() => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        child.kill();
+        resolve({ label, ok: false, output: "タイムアウトしました" });
+      }, 8_000);
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      child.on("error", (err) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        resolve({ label, ok: false, output: err.message });
+      });
+      child.on("exit", (code) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timer);
+        const output = `${stdout}${stderr}`.trim() || `(exit code ${code ?? "unknown"})`;
+        resolve({ label, ok: code === 0, output });
+      });
+    });
+  }
+
   private async refreshSessions(): Promise<void> {
     if (!this.client?.canListSessions) {
       return;
@@ -306,17 +551,42 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.replayAssistantOpen = false;
       this.fileEdits.clear();
+      this.changeReviewItems.clear();
+      this.replayBuffer = [];
       this.post({ type: "clear" });
+      this.postChangeReview();
       this.post({ type: "sessionLoading", title: "チャットを読み込み中..." });
-      this.sessionConfig = await this.client.loadSession(sessionId);
+
+      this.replayingSession = true;
+      try {
+        this.sessionConfig = await this.client.loadSession(sessionId);
+      } finally {
+        this.replayingSession = false;
+      }
+
+      let hasHistory = this.replayBuffer.some(
+        (message) => message.type === "userMessage" || message.type === "assistantChunk"
+      );
+      this.flushReplayBuffer();
       this.finishReplayTurn();
+
+      if (!hasHistory) {
+        const localHistory = await loadSessionHistory(sessionId);
+        if (localHistory.length > 0) {
+          this.replayLocalHistory(localHistory);
+          hasHistory = true;
+        }
+      }
+
       this.mode = this.sessionConfig.currentModeId;
       this.modelId = this.sessionConfig.currentModelId;
       await this.savePreferences();
       this.postConfig();
-      this.post({ type: "sessionLoaded" });
+      this.post({ type: "sessionLoaded", emptyHistory: !hasHistory });
       await this.refreshSessions();
     } catch (err) {
+      this.replayingSession = false;
+      this.replayBuffer = [];
       const message = err instanceof Error ? err.message : String(err);
       this.post({ type: "error", text: `チャットの読み込みに失敗: ${message}` });
       this.post({ type: "sessionLoaded" });
@@ -330,6 +600,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     this.post({ type: "assistantDone", stopReason: "replay" });
     this.replayAssistantOpen = false;
+  }
+
+  private replayLocalHistory(messages: SessionHistoryMessage[]): void {
+    let assistantOpen = false;
+
+    for (const message of messages) {
+      if (message.role === "user") {
+        if (assistantOpen) {
+          this.post({ type: "assistantDone", stopReason: "replay" });
+          assistantOpen = false;
+        }
+        this.post({ type: "userMessage", text: message.text });
+        continue;
+      }
+
+      if (!assistantOpen) {
+        this.post({ type: "assistantStart" });
+        assistantOpen = true;
+      }
+      this.post({ type: "assistantChunk", text: message.text });
+    }
+
+    if (assistantOpen) {
+      this.post({ type: "assistantDone", stopReason: "replay" });
+    }
   }
 
   private async handleSetMode(modeId: AgentMode): Promise<void> {
@@ -400,7 +695,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       this.fileEdits.set(merged.id, merged);
-      this.post({ type: "fileEdit", ...merged });
+      this.upsertChangeReviewItem(merged);
+      const { previousText: _previousText, nextText: _nextText, ...publicFileEdit } = merged;
+      this.post({ type: "fileEdit", ...publicFileEdit });
       return;
     }
 
@@ -435,6 +732,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private upsertChangeReviewItem(fileEdit: FileEditCardData): void {
+    const existing = this.changeReviewItems.get(fileEdit.path);
+    const next: ChangeReviewItem = {
+      ...(existing ?? {
+        path: fileEdit.path,
+        fileName: fileEdit.fileName,
+        previousText: fileEdit.previousText,
+      }),
+      path: fileEdit.path,
+      fileName: fileEdit.fileName,
+      status: fileEdit.status,
+      addedLines: fileEdit.addedLines || existing?.addedLines || 0,
+      removedLines: fileEdit.removedLines || existing?.removedLines || 0,
+      previewLines: fileEdit.previewLines.length > 0 ? fileEdit.previewLines : (existing?.previewLines ?? []),
+      previousText:
+        existing?.previousText !== undefined ? existing.previousText : fileEdit.previousText,
+      canRevert: (existing?.previousText !== undefined ? existing.previousText : fileEdit.previousText) !== undefined,
+      updatedAt: new Date().toISOString(),
+    };
+    this.changeReviewItems.set(fileEdit.path, next);
+    this.postChangeReview();
+  }
+
+  private postChangeReview(): void {
+    const items = [...this.changeReviewItems.values()].sort(
+      (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
+    ).map(({ previousText: _previousText, ...item }) => item);
+    this.post({ type: "changeReview", items });
+  }
+
   private async openFile(filePath: string, line = 1): Promise<void> {
     const resolved = this.resolvePath(filePath);
     try {
@@ -452,13 +779,150 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private resolvePermission(id: string, decision: string): void {
-    const resolve = this.permissionRequests.get(id);
-    if (!resolve) {
+  private async openDiff(filePath: string): Promise<void> {
+    const resolved = this.resolvePath(filePath);
+    const item = this.changeReviewItems.get(resolved);
+    if (!item || item.previousText === undefined) {
+      await this.openFile(resolved);
+      return;
+    }
+
+    try {
+      const storageUri =
+        this.extensionContext.globalStorageUri ??
+        vscode.Uri.file(nodePath.join(this.extensionContext.globalStoragePath, "review"));
+      const baselineDir = vscode.Uri.joinPath(storageUri, "review-baselines");
+      await fs.mkdir(baselineDir.fsPath, { recursive: true });
+      const safeName = Buffer.from(resolved).toString("base64url");
+      const baselineUri = vscode.Uri.joinPath(baselineDir, `${safeName}-${nodePath.basename(resolved)}`);
+      await fs.writeFile(baselineUri.fsPath, item.previousText ?? "", "utf8");
+      await vscode.commands.executeCommand(
+        "vscode.diff",
+        baselineUri,
+        vscode.Uri.file(resolved),
+        `${item.fileName}: before ↔ current`
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: `差分を開けませんでした: ${message}` });
+    }
+  }
+
+  private async revertFile(filePath: string): Promise<void> {
+    const resolved = this.resolvePath(filePath);
+    const item = this.changeReviewItems.get(resolved);
+    if (!item || item.previousText === undefined) {
+      this.post({ type: "error", text: "この変更は元内容がないため revert できません" });
+      return;
+    }
+
+    try {
+      if (item.previousText === null) {
+        await fs.rm(resolved, { force: true });
+      } else {
+        await fs.writeFile(resolved, item.previousText, "utf8");
+      }
+      this.changeReviewItems.delete(resolved);
+      this.postChangeReview();
+      this.post({ type: "system", text: `${item.fileName} を元に戻しました` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: `revert に失敗しました: ${message}` });
+    }
+  }
+
+  private getPermissionRules(): PermissionRule[] {
+    return this.extensionContext.globalState.get<PermissionRule[]>("cursorAgent.permissionRules", []);
+  }
+
+  private getPermissionHistory(): PermissionHistoryItem[] {
+    return this.extensionContext.globalState.get<PermissionHistoryItem[]>("cursorAgent.permissionHistory", []);
+  }
+
+  private async savePermissionHistory(item: Omit<PermissionHistoryItem, "id" | "createdAt">): Promise<void> {
+    const next: PermissionHistoryItem[] = [
+      {
+        ...item,
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        createdAt: new Date().toISOString(),
+      },
+      ...this.getPermissionHistory(),
+    ].slice(0, 30);
+
+    await this.extensionContext.globalState.update("cursorAgent.permissionHistory", next);
+    this.postPermissionState();
+  }
+
+  private async savePermissionRule(request: PermissionRequestState): Promise<void> {
+    const rules = this.getPermissionRules();
+    const exists = rules.some(
+      (rule) =>
+        rule.headline === request.presentation.headline &&
+        rule.detail === request.presentation.detail &&
+        rule.kind === request.kind
+    );
+    if (exists) {
+      return;
+    }
+
+    const next: PermissionRule[] = [
+      ...rules,
+      {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        headline: request.presentation.headline,
+        detail: request.presentation.detail,
+        kind: request.kind,
+        createdAt: new Date().toISOString(),
+      },
+    ];
+    await this.extensionContext.globalState.update("cursorAgent.permissionRules", next);
+  }
+
+  private findPermissionRule(title: string, kind?: string): PermissionRule | undefined {
+    const presentation = this.formatPermission(title, kind);
+    return this.getPermissionRules().find(
+      (rule) =>
+        rule.headline === presentation.headline &&
+        rule.detail === presentation.detail &&
+        rule.kind === kind
+    );
+  }
+
+  private async removePermissionRule(id: string): Promise<void> {
+    const next = this.getPermissionRules().filter((rule) => rule.id !== id);
+    await this.extensionContext.globalState.update("cursorAgent.permissionRules", next);
+    this.postPermissionState();
+  }
+
+  private async clearPermissionHistory(): Promise<void> {
+    await this.extensionContext.globalState.update("cursorAgent.permissionHistory", []);
+    this.postPermissionState();
+  }
+
+  private postPermissionState(): void {
+    this.post({
+      type: "permissionState",
+      rules: this.getPermissionRules(),
+      history: this.getPermissionHistory(),
+    });
+  }
+
+  private async resolvePermission(id: string, decision: string): Promise<void> {
+    const request = this.permissionRequests.get(id);
+    if (!request) {
       return;
     }
     this.permissionRequests.delete(id);
-    resolve(decision);
+    if (decision === "allow-always") {
+      await this.savePermissionRule(request);
+    }
+    await this.savePermissionHistory({
+      headline: request.presentation.headline,
+      detail: request.presentation.detail,
+      decision,
+      autoApproved: false,
+    });
+    request.resolve(decision === "allow-always" ? "allow-once" : decision);
   }
 
   private formatPermission(title: string, kind?: string): PermissionPresentation {
@@ -507,20 +971,22 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private bindClientEvents(client: AcpClient): void {
     client.on("update", (update) => {
       const sessionUpdate = update.sessionUpdate as string | undefined;
-      const content = update.content as { text?: string } | undefined;
+      const text = extractUpdateText(update.content);
 
-      if (sessionUpdate === "user_message_chunk" && content?.text) {
+      if (isUserMessageUpdate(sessionUpdate) && text) {
         this.finishReplayTurn();
-        this.post({ type: "userMessage", text: content.text });
+        this.post({ type: "userMessage", text });
         return;
       }
 
-      if (sessionUpdate === "agent_message_chunk" && content?.text) {
+      if (isAgentMessageUpdate(sessionUpdate) && text) {
         if (!this.busy && !this.replayAssistantOpen) {
-          this.post({ type: "assistantStart" });
+          if (!this.replayingSession) {
+            this.post({ type: "assistantStart" });
+          }
           this.replayAssistantOpen = true;
         }
-        this.post({ type: "assistantChunk", text: content.text });
+        this.post({ type: "assistantChunk", text });
         return;
       }
 
@@ -529,17 +995,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         return;
       }
 
-      if (sessionUpdate === "agent_thought_chunk" && content?.text) {
-        this.post({ type: "thinking", text: content.text, append: true });
+      if (sessionUpdate === "agent_thought_chunk" && text) {
+        this.post({ type: "thinking", text, append: true });
       }
     });
 
     client.on(
       "permission",
-      ({ title, kind, resolve }: { title: string; kind?: string; resolve: (v: string) => void }) => {
-        const id = String(++this.permissionCounter);
-        this.permissionRequests.set(id, resolve);
+      async ({ title, kind, resolve }: { title: string; kind?: string; resolve: (v: string) => void }) => {
         const presentation = this.formatPermission(title, kind);
+        const rule = this.findPermissionRule(title, kind);
+        if (rule) {
+          await this.savePermissionHistory({
+            headline: presentation.headline,
+            detail: presentation.detail,
+            decision: "allow-once",
+            autoApproved: true,
+          });
+          resolve("allow-once");
+          return;
+        }
+
+        const id = String(++this.permissionCounter);
+        this.permissionRequests.set(id, { resolve, title, kind, presentation });
         this.post({
           type: "permissionRequest",
           id,
@@ -683,11 +1161,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.sessionConfig = undefined;
     this.permissionRequests.clear();
     this.fileEdits.clear();
+    this.changeReviewItems.clear();
     this.busy = false;
     this.stopping = false;
     this.setRunningContext(false);
     this.replayAssistantOpen = false;
     this.post({ type: "clear" });
+    this.postChangeReview();
     this.post({ type: "init", status: "loading", message: "新しいチャットを準備中..." });
 
     const epoch = this.connectEpoch;
@@ -735,9 +1215,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async handleSend(text: string): Promise<void> {
+  private async handleRequestContextPreview(text: string): Promise<void> {
+    const root = this.workspaceRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
+    try {
+      const items = await getPromptContextPreview(text, root);
+      this.post({ type: "contextPreview", text, items });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "contextPreview", text, items: [], error: message });
+    }
+  }
+
+  private async handleSend(text: string, images?: PromptImageAttachment[]): Promise<void> {
     const trimmed = text.trim();
-    if (!trimmed || this.busy) {
+    const sanitizedImages = sanitizeImageAttachments(images);
+    if ((!trimmed && sanitizedImages.length === 0) || this.busy) {
       return;
     }
 
@@ -748,18 +1240,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     const root = this.workspaceRoot || process.cwd();
-    const promptText = await buildPromptText(trimmed, root);
+    const promptBlocks = await buildPromptBlocks(trimmed, root, sanitizedImages);
 
     this.busy = true;
     this.stopping = false;
     this.setRunningContext(true);
-    this.post({ type: "userMessage", text: trimmed });
+    this.post({ type: "userMessage", text: trimmed, images: sanitizedImages });
     this.post({ type: "assistantStart" });
     this.post({ type: "running", running: true, stopping: false });
     this.postConfig();
 
     try {
-      const result = await this.client!.prompt(promptText);
+      const result = await this.client!.prompt(promptBlocks);
 
       if (this.stopping || result.stopReason === "cancelled" || result.stopReason === "canceled") {
         this.finishCancel();
@@ -797,7 +1289,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private post(message: Record<string, unknown>): void {
+    if (this.replayingSession) {
+      this.replayBuffer.push(message);
+      return;
+    }
     void this.view?.webview.postMessage(message);
+  }
+
+  private flushReplayBuffer(): void {
+    for (const message of this.replayBuffer) {
+      void this.view?.webview.postMessage(message);
+    }
+    this.replayBuffer = [];
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -809,7 +1312,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}';" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: blob:;" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link rel="stylesheet" href="${styleUri}" />
   <title>Cursor Agent</title>
@@ -824,18 +1327,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span id="historyLabel">履歴</span>
       <span class="pill-chevron">▾</span>
     </button>
-    <button id="newChat" class="top-btn new-chat-btn" type="button" title="新しいチャット">
-      <svg class="btn-svg" width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-        <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
-      </svg>
-      <span>New Chat</span>
-    </button>
+    <div class="top-actions">
+      <button id="usageBtn" class="top-btn" type="button" title="Cursor 使用量ダッシュボードを開く">使用量</button>
+      <button id="changesBtn" class="top-btn" type="button" title="変更レビュー">変更</button>
+      <button id="permissionsBtn" class="top-btn" type="button" title="権限ルール">権限</button>
+      <button id="newChat" class="top-btn new-chat-btn" type="button" title="新しいチャット">
+        <svg class="btn-svg" width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+        </svg>
+        <span>New Chat</span>
+      </button>
+    </div>
   </div>
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
+  <div id="changesMenu" class="picker-menu picker-menu-wide changes-menu hidden" role="menu"></div>
+  <div id="permissionsMenu" class="picker-menu picker-menu-wide permission-menu hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">
     <div class="boot-card">
-      <span class="boot-spinner"></span>
-      <span id="bootLabel">エージェントに接続中...</span>
+      <div class="boot-main">
+        <span class="boot-spinner"></span>
+        <span id="bootLabel">エージェントに接続中...</span>
+      </div>
+      <div id="bootActions" class="boot-actions hidden">
+        <button id="retryConnectBtn" class="boot-action" type="button">再接続</button>
+        <button id="diagnoseBtn" class="boot-action" type="button">診断</button>
+        <button id="openSettingsBtn" class="boot-action" type="button">設定</button>
+      </div>
+      <div id="diagnosticsPanel" class="diagnostics-panel hidden"></div>
     </div>
   </div>
   <div class="thread-wrap">
@@ -867,7 +1385,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="modelMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
     <div id="suggestMenu" class="suggest-menu hidden" role="listbox"></div>
     <div class="composer-card">
-      <textarea id="input" rows="1" placeholder="質問や指示を入力（@ でコンテキスト追加）"></textarea>
+      <div id="contextTray" class="context-tray hidden" aria-label="添付コンテキスト"></div>
+      <div id="attachmentTray" class="attachment-tray hidden" aria-label="添付画像"></div>
+      <textarea id="input" rows="1" placeholder="質問や指示を入力（@ でコンテキスト、画像貼り付け可）"></textarea>
       <div class="composer-footer">
         <div class="composer-meta">
           <button id="modePill" class="pill" type="button" title="モード">
