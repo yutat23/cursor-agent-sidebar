@@ -298,15 +298,38 @@ export async function searchSlashItems(query: string, workspaceRoot: string): Pr
     }));
 }
 
+/**
+ * findFiles の glob は大文字小文字を区別するため、
+ * 英字を [tT] のような文字クラスに展開して大文字小文字非依存にする。
+ * glob の特殊文字も文字クラスに包んで無効化する。
+ */
+function toCaseInsensitiveGlob(text: string): string {
+  return text
+    .split("")
+    .map((ch) => {
+      const lower = ch.toLowerCase();
+      const upper = ch.toUpperCase();
+      if (lower !== upper) {
+        return `[${lower}${upper}]`;
+      }
+      if ("*?[]{}()!".includes(ch)) {
+        return `[${ch}]`;
+      }
+      return ch;
+    })
+    .join("");
+}
+
 export async function searchFileItems(query: string, workspaceRoot: string): Promise<SuggestItem[]> {
   const q = query.trim().toLowerCase().replace(/\\/g, "/");
   if (!workspaceRoot) {
     return [];
   }
 
+  const lastSegment = q.split("/").pop() ?? q;
   const pattern =
-    q.length > 0
-      ? `**/*${q.split("/").pop() ?? q}*`
+    lastSegment.length > 0
+      ? `**/*${toCaseInsensitiveGlob(lastSegment)}*`
       : "**/*";
 
   const [uris, folderItems] = await Promise.all([

@@ -817,11 +817,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div class="top-bar">
     <button id="historyBtn" class="top-btn history-btn" type="button" title="チャット履歴" disabled>
-      <span class="history-icon">🕘</span>
+      <svg class="btn-svg" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5"/>
+        <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
       <span id="historyLabel">履歴</span>
       <span class="pill-chevron">▾</span>
     </button>
-    <button id="newChat" class="top-btn" type="button" title="新しいチャット">+ New Chat</button>
+    <button id="newChat" class="top-btn new-chat-btn" type="button" title="新しいチャット">
+      <svg class="btn-svg" width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+      </svg>
+      <span>New Chat</span>
+    </button>
   </div>
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">
@@ -830,20 +838,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span id="bootLabel">エージェントに接続中...</span>
     </div>
   </div>
-  <main id="thread" class="thread" aria-live="polite"></main>
+  <div class="thread-wrap">
+    <main id="thread" class="thread" aria-live="polite"></main>
+    <div id="emptyState" class="empty-state">
+      <div class="empty-title">Cursor Agent</div>
+      <div class="empty-sub">コードについて質問したり、編集やタスクを依頼できます</div>
+      <ul class="empty-hints">
+        <li><kbd>@</kbd><span>ファイル・フォルダをコンテキストに追加</span></li>
+        <li><kbd>/</kbd><span>コマンド・スキルを呼び出す</span></li>
+        <li><kbd>Shift</kbd><span class="kbd-plus">+</span><kbd>Enter</kbd><span>改行を挿入</span></li>
+      </ul>
+    </div>
+    <button id="jumpBottom" class="jump-bottom hidden" type="button" title="最新のメッセージへ">
+      <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+        <path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
   <div id="taskStatus" class="task-status hidden" role="status">
     <span class="task-label">
       <span class="task-spinner"></span>
       <span id="taskLabel">エージェント実行中...</span>
     </span>
-    <span>Esc to stop</span>
+    <span class="task-hint"><kbd>Esc</kbd> で停止</span>
   </div>
   <footer class="composer-dock">
     <div id="modeMenu" class="picker-menu hidden" role="menu"></div>
     <div id="modelMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
     <div id="suggestMenu" class="suggest-menu hidden" role="listbox"></div>
     <div class="composer-card">
-      <textarea id="input" rows="1" placeholder="Plan, @ for context, Enter to send"></textarea>
+      <textarea id="input" rows="1" placeholder="質問や指示を入力（@ でコンテキスト追加）"></textarea>
       <div class="composer-footer">
         <div class="composer-meta">
           <button id="modePill" class="pill" type="button" title="モード">
@@ -872,7 +896,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <button id="stopBtn" class="icon-btn stop-btn-round hidden" type="button" title="Stop (Esc)">
             <span class="stop-icon"></span>
           </button>
-          <button id="send" class="icon-btn send-btn" type="button" title="Send">↑</button>
+          <button id="send" class="icon-btn send-btn" type="button" title="送信 (Enter)">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </button>
         </div>
       </div>
     </div>
