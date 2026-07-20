@@ -1,5 +1,58 @@
 (function () {
   const vscode = acquireVsCodeApi();
+  const locale = document.documentElement.lang.toLowerCase().startsWith("ja") ? "ja" : "en";
+  const TEXT = {
+    taskStopping: ["停止しています...", "Stopping..."],
+    taskRunning: ["エージェント実行中...", "Agent is running..."],
+    followupPlaceholder: ["フォローアップを入力...", "Enter a follow-up..."],
+    promptPlaceholder: ["質問や指示を入力（@ でコンテキスト追加）", "Ask a question or enter an instruction (@ for context)"],
+    autoRunOn: ["自動実行 ON — ツールは確認なしで実行されます（--yolo）", "Auto-run ON — tools run without confirmation (--yolo)"],
+    autoRunOff: ["自動実行 OFF — クリックで ON（--yolo 相当）", "Auto-run OFF — click to enable (--yolo equivalent)"],
+    connecting: ["エージェントに接続中...", "Connecting to the agent..."],
+    connectionFailed: ["接続に失敗しました", "Connection failed"],
+    diagnostics: ["診断", "Diagnostics"],
+    justNow: ["たった今", "just now"],
+    minutesAgo: ["{0}分前", "{0} min ago"],
+    hoursAgo: ["{0}時間前", "{0} hr ago"],
+    daysAgo: ["{0}日前", "{0} days ago"],
+    history: ["履歴", "History"],
+    loading: ["読み込み中...", "Loading..."],
+    alwaysAllow: ["常に許可", "Always allow"],
+    noSavedRules: ["保存済みルールはありません", "No saved rules"],
+    remove: ["削除", "Remove"],
+    clear: ["消去", "Clear"],
+    noHistory: ["履歴はありません", "No history"],
+    autoAllowed: ["自動許可", "Auto-allowed"],
+    denied: ["拒否", "Denied"],
+    allowed: ["許可", "Allowed"],
+    tool: ["ツール", "Tool"],
+    changeReview: ["変更レビュー", "Change review"],
+    noChanges: ["まだ変更はありません", "No changes yet"],
+    openDiff: ["差分を開く", "Open diff"],
+    open: ["開く", "Open"],
+    revert: ["戻す", "Revert"],
+    cancelled: ["キャンセルされました", "Cancelled"],
+    toolExecution: ["ツールの実行", "Tool execution"],
+    allow: ["許可", "Allow"],
+    allowAlways: ["常に許可", "Always allow"],
+    reject: ["拒否", "Deny"],
+    allowedOnce: ["許可しました", "Allowed"],
+    allowedAlways: ["常に許可しました", "Always allowed"],
+    rejected: ["拒否しました", "Denied"],
+    copy: ["コピー", "Copy"],
+    copyMessage: ["メッセージをコピー", "Copy message"],
+    imageTooLarge: ["画像は 5MB 以下にしてください", "Images must be 5 MB or smaller"],
+    maxImages: ["画像は最大 {0} 枚までです", "You can attach up to {0} images"],
+    imageLoadFailed: ["画像の読み込みに失敗しました", "Failed to load image"],
+    openFile: ["クリックしてファイルを開く", "Click to open file"],
+    historyLoadFailed: ["このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。", "The display history for this session could not be loaded. The agent state was restored, so you can continue sending messages."],
+  };
+
+  function t(key, ...values) {
+    const entry = TEXT[key];
+    const template = entry ? entry[locale === "ja" ? 0 : 1] : key;
+    return template.replace(/\{(\d+)\}/g, (_, index) => String(values[Number(index)] ?? ""));
+  }
 
   const threadEl = document.getElementById("thread");
   const inputEl = document.getElementById("input");
@@ -87,11 +140,11 @@
     footerSpinner.classList.toggle("hidden", !running || isStopping);
     taskStatus.classList.toggle("hidden", !running);
 
-    taskLabel.textContent = isStopping ? "停止しています..." : "エージェント実行中...";
+    taskLabel.textContent = isStopping ? t("taskStopping") : t("taskRunning");
     inputEl.disabled = running;
     inputEl.placeholder = running
-      ? "フォローアップを入力..."
-      : "質問や指示を入力（@ でコンテキスト追加）";
+      ? t("followupPlaceholder")
+      : t("promptPlaceholder");
 
     updateInteractiveState();
 
@@ -115,14 +168,14 @@
     autoRunPill.classList.toggle("is-active", autoApproveEnabled);
     autoRunPill.setAttribute("aria-pressed", autoApproveEnabled ? "true" : "false");
     autoRunPill.title = autoApproveEnabled
-      ? "自動実行 ON — ツールは確認なしで実行されます（--yolo）"
-      : "自動実行 OFF — クリックで ON（--yolo 相当）";
+      ? t("autoRunOn")
+      : t("autoRunOff");
   }
 
   function setBootState(status, message) {
     if (status === "loading") {
       bootOverlay.classList.remove("hidden");
-      bootLabel.textContent = message || "エージェントに接続中...";
+      bootLabel.textContent = message || t("connecting");
       bootActions.classList.add("hidden");
       diagnosticsPanel.classList.add("hidden");
       diagnosticsPanel.innerHTML = "";
@@ -133,7 +186,7 @@
 
     if (status === "error") {
       bootOverlay.classList.remove("hidden");
-      bootLabel.textContent = message || "接続に失敗しました";
+      bootLabel.textContent = message || t("connectionFailed");
       bootActions.classList.remove("hidden");
       sessionReady = false;
       updateInteractiveState();
@@ -161,7 +214,7 @@
       row.innerHTML = `
         <div class="diagnostic-head">
           <span class="diagnostic-dot"></span>
-          <span class="diagnostic-label">${escapeHtml(result.label || "診断")}</span>
+          <span class="diagnostic-label">${escapeHtml(result.label || t("diagnostics"))}</span>
         </div>
         <pre class="diagnostic-output">${escapeHtml(result.output || "")}</pre>
       `;
@@ -509,12 +562,12 @@
     const date = new Date(iso);
     const diffMs = Date.now() - date.getTime();
     const mins = Math.floor(diffMs / 60000);
-    if (mins < 1) return "たった今";
-    if (mins < 60) return `${mins}分前`;
+    if (mins < 1) return t("justNow");
+    if (mins < 60) return t("minutesAgo", mins);
     const hours = Math.floor(mins / 60);
-    if (hours < 24) return `${hours}時間前`;
+    if (hours < 24) return t("hoursAgo", hours);
     const days = Math.floor(hours / 24);
-    if (days < 7) return `${days}日前`;
+    if (days < 7) return t("daysAgo", days);
     return date.toLocaleDateString("ja-JP", { month: "short", day: "numeric" });
   }
 
@@ -526,7 +579,7 @@
     if (!sessions.length) {
       const empty = document.createElement("div");
       empty.className = "picker-empty";
-      empty.textContent = sessionReady ? "履歴がありません" : "読み込み中...";
+      empty.textContent = sessionReady ? t("noHistory") : t("loading");
       list.appendChild(empty);
     } else {
       for (const session of sessions) {
@@ -568,7 +621,7 @@
 
     const rulesTitle = document.createElement("div");
     rulesTitle.className = "permission-menu-title";
-    rulesTitle.textContent = "常に許可";
+    rulesTitle.textContent = t("alwaysAllow");
     permissionsMenu.appendChild(rulesTitle);
 
     const rulesList = document.createElement("div");
@@ -576,7 +629,7 @@
     if (!permissionRules.length) {
       const empty = document.createElement("div");
       empty.className = "picker-empty";
-      empty.textContent = "保存済みルールはありません";
+      empty.textContent = t("noSavedRules");
       rulesList.appendChild(empty);
     } else {
       for (const rule of permissionRules) {
@@ -584,10 +637,10 @@
         row.className = "permission-menu-row";
         row.innerHTML = `
           <span class="permission-menu-copy">
-            <span class="permission-menu-head">${escapeHtml(rule.headline || "ツール")}</span>
+            <span class="permission-menu-head">${escapeHtml(rule.headline || t("tool"))}</span>
             <span class="permission-menu-detail">${escapeHtml(rule.detail || "")}</span>
           </span>
-          <button class="permission-menu-remove" type="button" title="削除">×</button>
+          <button class="permission-menu-remove" type="button" title="${t("remove")}">×</button>
         `;
         row.querySelector(".permission-menu-remove").addEventListener("click", () => {
           vscode.postMessage({ type: "removePermissionRule", id: rule.id });
@@ -599,7 +652,7 @@
 
     const historyTitle = document.createElement("div");
     historyTitle.className = "permission-menu-title permission-menu-title-inline";
-    historyTitle.innerHTML = '<span>履歴</span><button class="permission-clear" type="button">消去</button>';
+    historyTitle.innerHTML = `<span>${t("history")}</span><button class="permission-clear" type="button">${t("clear")}</button>`;
     historyTitle.querySelector(".permission-clear").addEventListener("click", () => {
       vscode.postMessage({ type: "clearPermissionHistory" });
     });
@@ -610,19 +663,19 @@
     if (!permissionHistory.length) {
       const empty = document.createElement("div");
       empty.className = "picker-empty";
-      empty.textContent = "履歴はありません";
+      empty.textContent = t("noHistory");
       historyList.appendChild(empty);
     } else {
       for (const item of permissionHistory.slice(0, 12)) {
         const row = document.createElement("div");
         row.className = "permission-history-row";
         const decision =
-          item.autoApproved ? "自動許可" :
-          item.decision === "reject-once" ? "拒否" :
-          item.decision === "allow-always" ? "常に許可" : "許可";
+          item.autoApproved ? t("autoAllowed") :
+          item.decision === "reject-once" ? t("denied") :
+          item.decision === "allow-always" ? t("alwaysAllow") : t("allowed");
         row.innerHTML = `
           <span class="permission-menu-copy">
-            <span class="permission-menu-head">${escapeHtml(decision)} · ${escapeHtml(item.headline || "ツール")}</span>
+            <span class="permission-menu-head">${escapeHtml(decision)} · ${escapeHtml(item.headline || t("tool"))}</span>
             <span class="permission-menu-detail">${escapeHtml(item.detail || "")}</span>
           </span>
           <span class="permission-menu-time">${escapeHtml(formatPermissionTime(item.createdAt))}</span>
@@ -638,7 +691,7 @@
 
     const title = document.createElement("div");
     title.className = "permission-menu-title permission-menu-title-inline";
-    title.innerHTML = '<span>変更レビュー</span><button class="permission-clear" type="button">消去</button>';
+    title.innerHTML = `<span>${t("changeReview")}</span><button class="permission-clear" type="button">${t("clear")}</button>`;
     title.querySelector(".permission-clear").addEventListener("click", () => {
       vscode.postMessage({ type: "clearChangeReview" });
     });
@@ -649,20 +702,20 @@
     if (!changeReviewItems.length) {
       const empty = document.createElement("div");
       empty.className = "picker-empty";
-      empty.textContent = "まだ変更はありません";
+      empty.textContent = t("noChanges");
       list.appendChild(empty);
     } else {
       for (const item of changeReviewItems) {
         const row = document.createElement("div");
         row.className = "change-review-row";
         row.innerHTML = `
-          <button class="change-review-main" type="button" title="差分を開く">
+          <button class="change-review-main" type="button" title="${t("openDiff")}">
             <span class="change-review-name">${escapeHtml(item.fileName || item.path)}</span>
             <span class="change-review-detail">${formatEditStats(item.addedLines || 0, item.removedLines || 0)} · ${escapeHtml(item.status || "updated")}</span>
           </button>
           <span class="change-review-actions">
-            <button class="change-review-action" type="button" data-action="open">開く</button>
-            <button class="change-review-action" type="button" data-action="revert" ${item.canRevert ? "" : "disabled"}>戻す</button>
+            <button class="change-review-action" type="button" data-action="open">${t("open")}</button>
+            <button class="change-review-action" type="button" data-action="revert" ${item.canRevert ? "" : "disabled"}>${t("revert")}</button>
           </span>
         `;
         row.querySelector(".change-review-main").addEventListener("click", () => {
@@ -682,7 +735,7 @@
 
   function renderModeMenu() {
     if (!sessionConfig?.modes?.length) {
-      modeMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
+      modeMenu.innerHTML = `<div class="picker-empty">${t("loading")}</div>`;
       return;
     }
     modeMenu.innerHTML = "";
@@ -710,7 +763,7 @@
 
   function updateModelMenuList(filter) {
     if (!sessionConfig?.models?.length) {
-      modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
+      modelMenu.innerHTML = `<div class="picker-empty">${t("loading")}</div>`;
       return;
     }
 
@@ -762,7 +815,7 @@
     modelMenu.innerHTML = "";
 
     if (!sessionConfig?.models?.length) {
-      modelMenu.innerHTML = '<div class="picker-empty">読み込み中...</div>';
+      modelMenu.innerHTML = `<div class="picker-empty">${t("loading")}</div>`;
       return;
     }
 
@@ -851,7 +904,7 @@
       card.classList.add("dismissed");
       const actions = card.querySelector(".permission-actions");
       if (actions) {
-        actions.innerHTML = '<span class="permission-resolved">キャンセルされました</span>';
+        actions.innerHTML = `<span class="permission-resolved">${t("cancelled")}</span>`;
       }
     });
   }
@@ -862,7 +915,7 @@
     card.dataset.requestId = msg.id;
 
     const icon = msg.icon || "🔧";
-    const title = escapeHtml(msg.title || "ツールの実行");
+    const title = escapeHtml(msg.title || t("toolExecution"));
     const detail = escapeHtml(msg.detail || "");
 
     card.innerHTML = `
@@ -874,9 +927,9 @@
         </div>
       </div>
       <div class="permission-actions">
-        <button type="button" class="perm-btn perm-allow" data-decision="allow-once">許可</button>
-        <button type="button" class="perm-btn perm-always" data-decision="allow-always">常に許可</button>
-        <button type="button" class="perm-btn perm-deny" data-decision="reject-once">拒否</button>
+        <button type="button" class="perm-btn perm-allow" data-decision="allow-once">${t("allow")}</button>
+        <button type="button" class="perm-btn perm-always" data-decision="allow-always">${t("allowAlways")}</button>
+        <button type="button" class="perm-btn perm-deny" data-decision="reject-once">${t("reject")}</button>
       </div>
     `;
 
@@ -884,8 +937,8 @@
       btn.addEventListener("click", () => {
         const decision = btn.dataset.decision;
         const label =
-          decision === "allow-once" ? "許可しました" :
-          decision === "allow-always" ? "常に許可しました" : "拒否しました";
+          decision === "allow-once" ? t("allowedOnce") :
+          decision === "allow-always" ? t("allowedAlways") : t("rejected");
 
         vscode.postMessage({ type: "permissionResponse", id: msg.id, decision });
         card.classList.remove("pending");
@@ -1123,7 +1176,7 @@
         const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
         out.push(
           `<div class="code-wrap"><pre class="code-block"${langAttr}><code>${highlightCode(chunks.join("\n"), language)}</code></pre>` +
-            `<button class="copy-btn code-copy" type="button" title="コピー">${COPY_ICON}</button></div>`
+            `<button class="copy-btn code-copy" type="button" title="${t("copy")}">${COPY_ICON}</button></div>`
         );
         i += 1;
         continue;
@@ -1235,7 +1288,7 @@
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
     copyBtn.className = "copy-btn msg-copy";
-    copyBtn.title = "メッセージをコピー";
+    copyBtn.title = t("copyMessage");
     copyBtn.innerHTML = COPY_ICON;
     el.appendChild(copyBtn);
 
@@ -1350,11 +1403,11 @@
       return;
     }
     if (file.size > MAX_IMAGE_BYTES) {
-      showAttachmentError("画像は 5MB 以下にしてください");
+      showAttachmentError(t("imageTooLarge"));
       return;
     }
     if (pendingAttachments.length >= MAX_IMAGE_ATTACHMENTS) {
-      showAttachmentError(`画像は最大 ${MAX_IMAGE_ATTACHMENTS} 枚までです`);
+      showAttachmentError(t("maxImages", MAX_IMAGE_ATTACHMENTS));
       return;
     }
 
@@ -1368,7 +1421,7 @@
       });
       renderAttachmentTray();
     } catch {
-      showAttachmentError("画像の読み込みに失敗しました");
+      showAttachmentError(t("imageLoadFailed"));
     }
   }
 
@@ -1513,7 +1566,7 @@
 
   function renderFileEditPreview(lines) {
     if (!lines || lines.length === 0) {
-      return '<div class="file-edit-empty">クリックしてファイルを開く</div>';
+      return `<div class="file-edit-empty">${t("openFile")}</div>`;
     }
 
     return lines
@@ -1920,7 +1973,7 @@
         const loading = document.createElement("div");
         loading.id = "sessionLoading";
         loading.className = "session-loading";
-        loading.innerHTML = `<span class="boot-spinner"></span><span>${escapeHtml(msg.title || "読み込み中...")}</span>`;
+        loading.innerHTML = `<span class="boot-spinner"></span><span>${escapeHtml(msg.title || t("loading"))}</span>`;
         threadEl.appendChild(loading);
         scrollToBottom();
         break;
@@ -1932,7 +1985,7 @@
           const note = document.createElement("div");
           note.className = "system-note";
           note.innerHTML =
-            '<span class="system-note-text">このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。</span>';
+            `<span class="system-note-text">${t("historyLoadFailed")}</span>`;
           threadEl.appendChild(note);
         }
         stickToBottom = true;
@@ -2023,6 +2076,6 @@
   });
 
   setRunning(false, false);
-  setBootState("loading", "エージェントに接続中...");
+  setBootState("loading", t("connecting"));
   vscode.postMessage({ type: "ready" });
 })();

@@ -6,4 +6,5 @@ node_modules/**
 tsconfig.json
 **/*.map
 **/*.ts
+scripts/**
 test-acp.js

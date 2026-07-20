@@ -43,6 +43,19 @@ interface JsonRpcMessage {
 
 type InteractionRelease = () => void;
 
+export function validateAgentPath(agentPath: string): string {
+  const normalized = agentPath.trim();
+  if (!normalized) {
+    throw new Error("The Cursor CLI agent path is empty");
+  }
+
+  if (process.platform === "win32" && /[&|<>^\"`%!]/.test(normalized)) {
+    throw new Error("agentPath cannot contain shell metacharacters");
+  }
+
+  return normalized;
+}
+
 export class AcpClient extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | undefined;
   private rl: readline.Interface | undefined;
@@ -87,7 +100,7 @@ export class AcpClient extends EventEmitter {
       return;
     }
 
-    this.process = spawn(this.options.agentPath, ["acp"], {
+    this.process = spawn(validateAgentPath(this.options.agentPath), ["acp"], {
       stdio: ["pipe", "pipe", "pipe"],
       shell: process.platform === "win32",
       cwd: this.options.cwd,
@@ -155,7 +168,7 @@ export class AcpClient extends EventEmitter {
 
   async loadSession(sessionId: string): Promise<SessionPickerConfig> {
     if (!this.supportsLoadSession) {
-      throw new Error("このエージェントはセッション読み込みに対応していません");
+      throw new Error("This agent does not support loading session history");
     }
 
     const result = (await this.send("session/load", {
@@ -388,7 +401,7 @@ export class AcpClient extends EventEmitter {
     }
 
     const toolCall = params?.toolCall as { title?: string; kind?: string } | undefined;
-    const title = toolCall?.title ?? "ツール実行の許可";
+    const title = toolCall?.title ?? "Tool permission request";
     const kind = toolCall?.kind;
 
     try {

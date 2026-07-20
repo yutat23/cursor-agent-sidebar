@@ -1,9 +1,26 @@
 {
   "name": "cursor-agent-sidebar",
   "displayName": "Cursor Agent Sidebar",
-  "description": "Secondary Side Bar で Cursor CLI agent とチャットする拡張機能",
+  "description": "Chat with the Cursor CLI Agent from the VS Code secondary sidebar using ACP.",
   "version": "0.1.0",
-  "publisher": "local",
+  "publisher": "yutat23",
+  "icon": "media/marketplace-icon.png",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yutat23/cursor-agent-sidebar.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yutat23/cursor-agent-sidebar/issues"
+  },
+  "homepage": "https://github.com/yutat23/cursor-agent-sidebar#readme",
+  "keywords": [
+    "cursor",
+    "agent",
+    "acp",
+    "chat",
+    "sidebar"
+  ],
   "engines": {
     "vscode": "^1.96.0"
   },
@@ -76,31 +93,39 @@
         "cursorAgent.agentPath": {
           "type": "string",
           "default": "agent",
-          "description": "Cursor CLI agent コマンドのパス（PATH 上の agent またはフルパス）"
+          "scope": "machine",
+          "description": "Path to the Cursor CLI agent command. Use agent on PATH or an absolute path."
         },
         "cursorAgent.model": {
           "type": "string",
           "default": "",
-          "description": "使用するモデル（空の場合はデフォルト）"
+          "description": "Model to use. Leave empty to use the default model."
         },
         "cursorAgent.autoApprovePermissions": {
           "type": "boolean",
           "default": false,
-          "description": "ツール実行の許可を自動的に承認する（--yolo 相当）"
+          "description": "Automatically approve tool requests (--yolo equivalent)."
         }
       }
+    }
+  },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "The Cursor CLI Agent can run tools and modify files, so Workspace Trust is required."
     }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "package": "vsce package"
+    "package": "vsce package",
+    "publish:marketplace": "vsce publish"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/vscode": "^1.96.0",
     "typescript": "^5.7.0",
-    "vsce": "^2.15.0"
+    "@vscode/vsce": "^3.6.0"
   }
 }

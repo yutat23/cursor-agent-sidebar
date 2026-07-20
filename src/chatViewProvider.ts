@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
-import { AcpClient, AgentMode } from "./acpClient";
+import { AcpClient, AgentMode, validateAgentPath } from "./acpClient";
 import { AcpSessionInfo, formatModelDisplayName, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
@@ -156,6 +156,7 @@ function isAgentMessageUpdate(sessionUpdate: string | undefined): boolean {
 }
 
 export class ChatViewProvider implements vscode.WebviewViewProvider {
+  private readonly locale: "ja" | "en" = vscode.env.language.toLowerCase().startsWith("ja") ? "ja" : "en";
   private view?: vscode.WebviewView;
   private client?: AcpClient;
   private busy = false;
@@ -181,6 +182,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.mode = extensionContext.globalState.get<AgentMode>("cursorAgent.mode", "agent");
     this.modelId = extensionContext.globalState.get<string>("cursorAgent.modelId", "default[]");
+  }
+
+  private uiText(japanese: string, english: string): string {
+    return this.locale === "ja" ? japanese : english;
   }
 
   resolveWebviewView(
@@ -301,6 +306,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleSetAutoApprove(enabled: boolean): Promise<void> {
+    const current = this.getAutoApprovePermissions();
+    if (enabled && !current) {
+      const enableLabel = this.uiText("有効にする", "Enable");
+      const choice = await vscode.window.showWarningMessage(
+        this.uiText(
+          "自動実行を有効にすると、ファイル変更やコマンド実行が確認なしで許可されます。",
+          "When auto-run is enabled, file changes and command execution can be approved without confirmation."
+        ),
+        { modal: true },
+        enableLabel
+      );
+      if (choice !== enableLabel) {
+        this.post({ type: "settings", autoApprovePermissions: current });
+        return;
+      }
+    }
+
     const config = vscode.workspace.getConfiguration("cursorAgent");
     await config.update("autoApprovePermissions", enabled, vscode.ConfigurationTarget.Global);
     this.client?.setAutoApprovePermissions(enabled);
@@ -384,7 +406,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async connectClient(): Promise<void> {
     const epoch = this.connectEpoch;
-    this.post({ type: "init", status: "loading", message: "エージェントに接続中..." });
+    this.post({ type: "init", status: "loading", message: this.uiText("エージェントに接続中...", "Connecting to the agent...") });
 
     const config = vscode.workspace.getConfiguration("cursorAgent");
     const agentPath = config.get<string>("agentPath", "agent");
@@ -416,8 +438,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "init", status: "error", message: `接続に失敗しました: ${message}` });
-      this.post({ type: "error", text: `接続に失敗しました: ${message}` });
+      const errorMessage = this.uiText(`接続に失敗しました: ${message}`, `Connection failed: ${message}`);
+      this.post({ type: "init", status: "error", message: errorMessage });
+      this.post({ type: "error", text: errorMessage });
       this.abandonClient(client);
       throw err;
     }
@@ -444,7 +467,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({
       type: "diagnostics",
       running: true,
-      results: [{ label: "診断", ok: true, output: "Cursor CLI を確認中..." }],
+      results: [{ label: this.uiText("診断", "Diagnostics"), ok: true, output: this.uiText("Cursor CLI を確認中...", "Checking Cursor CLI...") }],
     });
 
     const results = await Promise.all([
@@ -462,7 +485,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     label: string
   ): Promise<DiagnosticResult> {
     return new Promise((resolve) => {
-      const child = spawn(agentPath, args, {
+      let safeAgentPath: string;
+      try {
+        safeAgentPath = validateAgentPath(agentPath);
+      } catch (err) {
+        resolve({ label, ok: false, output: err instanceof Error ? err.message : String(err) });
+        return;
+      }
+
+      const child = spawn(safeAgentPath, args, {
         cwd,
         shell: process.platform === "win32",
         env: { ...process.env },
@@ -477,7 +508,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         settled = true;
         child.kill();
-        resolve({ label, ok: false, output: "タイムアウトしました" });
+        resolve({ label, ok: false, output: this.uiText("タイムアウトしました", "Timed out") });
       }, 8_000);
 
       child.stdout.on("data", (chunk: Buffer) => {
@@ -545,7 +576,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       await this.ensureClient();
       if (!this.client?.canLoadSession) {
-        this.post({ type: "error", text: "このエージェントは履歴の読み込みに対応していません" });
+        this.post({ type: "error", text: this.uiText("このエージェントは履歴の読み込みに対応していません", "This agent does not support loading session history") });
         return;
       }
 
@@ -555,7 +586,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.replayBuffer = [];
       this.post({ type: "clear" });
       this.postChangeReview();
-      this.post({ type: "sessionLoading", title: "チャットを読み込み中..." });
+      this.post({ type: "sessionLoading", title: this.uiText("チャットを読み込み中...", "Loading chat...") });
 
       this.replayingSession = true;
       try {
@@ -588,7 +619,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.replayingSession = false;
       this.replayBuffer = [];
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `チャットの読み込みに失敗: ${message}` });
+      this.post({ type: "error", text: this.uiText(`チャットの読み込みに失敗: ${message}`, `Failed to load chat: ${message}`) });
       this.post({ type: "sessionLoaded" });
     }
   }
@@ -640,7 +671,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postConfig();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `モード変更に失敗: ${message}` });
+      this.post({ type: "error", text: this.uiText(`モード変更に失敗: ${message}`, `Failed to change mode: ${message}`) });
     }
   }
 
@@ -657,7 +688,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postConfig();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `モデル変更に失敗: ${message}` });
+      this.post({ type: "error", text: this.uiText(`モデル変更に失敗: ${message}`, `Failed to change model: ${message}`) });
     }
   }
 
@@ -704,7 +735,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({
       type: "toolActivity",
       id: parsed.toolCallId,
-      title: parsed.activityTitle ?? parsed.title ?? "ツール",
+      title: parsed.activityTitle ?? parsed.title ?? this.uiText("ツール", "Tool"),
       status: parsed.status ?? "in_progress",
       isUpdate: update.sessionUpdate === "tool_call_update",
     });
@@ -715,6 +746,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return filePath;
     }
     return nodePath.join(this.workspaceRoot || process.cwd(), filePath);
+  }
+
+  private isPathInside(rootPath: string, targetPath: string): boolean {
+    const relative = nodePath.relative(rootPath, targetPath);
+    return (
+      relative === "" ||
+      (!relative.startsWith(`..${nodePath.sep}`) && relative !== ".." && !nodePath.isAbsolute(relative))
+    );
+  }
+
+  private async isSafeWorkspaceMutationPath(filePath: string): Promise<boolean> {
+    const configuredRoot = this.workspaceRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!configuredRoot) {
+      return false;
+    }
+
+    const lexicalRoot = nodePath.resolve(configuredRoot);
+    const resolved = nodePath.resolve(filePath);
+    if (!this.isPathInside(lexicalRoot, resolved)) {
+      return false;
+    }
+
+    try {
+      const realRoot = await fs.realpath(lexicalRoot);
+      let realTarget: string;
+      try {
+        realTarget = await fs.realpath(resolved);
+      } catch {
+        realTarget = await fs.realpath(nodePath.dirname(resolved));
+      }
+      return this.isPathInside(realRoot, realTarget);
+    } catch {
+      return false;
+    }
   }
 
   private async loadFilePreview(
@@ -775,7 +840,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `ファイルを開けませんでした: ${message}` });
+      this.post({ type: "error", text: this.uiText(`ファイルを開けませんでした: ${message}`, `Failed to open file: ${message}`) });
     }
   }
 
@@ -804,7 +869,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       );
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `差分を開けませんでした: ${message}` });
+      this.post({ type: "error", text: this.uiText(`差分を開けませんでした: ${message}`, `Failed to open diff: ${message}`) });
     }
   }
 
@@ -812,7 +877,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const resolved = this.resolvePath(filePath);
     const item = this.changeReviewItems.get(resolved);
     if (!item || item.previousText === undefined) {
-      this.post({ type: "error", text: "この変更は元内容がないため revert できません" });
+      this.post({ type: "error", text: this.uiText("この変更は元内容がないため revert できません", "This change cannot be reverted because its original content is unavailable") });
+      return;
+    }
+
+    if (!(await this.isSafeWorkspaceMutationPath(resolved))) {
+      this.post({ type: "error", text: this.uiText("ワークスペース外のファイルは revert できません", "Files outside the workspace cannot be reverted") });
       return;
     }
 
@@ -824,10 +894,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
       this.changeReviewItems.delete(resolved);
       this.postChangeReview();
-      this.post({ type: "system", text: `${item.fileName} を元に戻しました` });
+      this.post({ type: "system", text: this.uiText(`${item.fileName} を元に戻しました`, `Reverted ${item.fileName}`) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `revert に失敗しました: ${message}` });
+      this.post({ type: "error", text: this.uiText(`revert に失敗しました: ${message}`, `Failed to revert: ${message}`) });
     }
   }
 
@@ -931,16 +1001,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const lower = `${kind ?? ""} ${title}`.toLowerCase();
 
     if (lower.includes("write") || lower.includes("edit") || lower.includes("create") || /\.(bat|sh|ps1|js|ts|py|md|json)/i.test(path)) {
-      return { headline: "ファイルの作成・変更", detail: path, icon: "📝" };
+      return { headline: this.uiText("ファイルの作成・変更", "File creation or change"), detail: path, icon: "📝" };
     }
     if (lower.includes("run") || lower.includes("exec") || lower.includes("command") || lower.includes("shell")) {
-      return { headline: "コマンドの実行", detail: path, icon: "⚡" };
+      return { headline: this.uiText("コマンドの実行", "Command execution"), detail: path, icon: "⚡" };
     }
     if (lower.includes("read") || lower.includes("glob") || lower.includes("search")) {
-      return { headline: "ファイルの読み取り", detail: path, icon: "🔍" };
+      return { headline: this.uiText("ファイルの読み取り", "File reading"), detail: path, icon: "🔍" };
     }
 
-    return { headline: "ツールの実行", detail: path, icon: "🔧" };
+    return { headline: this.uiText("ツールの実行", "Tool execution"), detail: path, icon: "🔧" };
   }
 
   private postConfig(): void {
@@ -1087,13 +1157,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.window.showTextDocument(doc, { preview: true });
 
         const choice = await vscode.window.showInformationMessage(
-          "プランを承認しますか？",
+          this.uiText("プランを承認しますか？", "Do you approve this plan?"),
           { modal: true },
-          "承認",
-          "拒否"
+          this.uiText("承認", "Approve"),
+          this.uiText("拒否", "Reject")
         );
 
-        resolve(choice === "承認" ? "accepted" : "rejected");
+        resolve(choice === this.uiText("承認", "Approve") ? "accepted" : "rejected");
       }
     );
 
@@ -1104,7 +1174,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
 
     client.on("exit", (code) => {
-      this.post({ type: "error", text: `エージェントプロセスが終了しました (code: ${code})` });
+      this.post({ type: "error", text: this.uiText(`エージェントプロセスが終了しました (code: ${code})`, `The agent process exited (code: ${code})`) });
       this.client = undefined;
       this.busy = false;
       this.stopping = false;
@@ -1125,7 +1195,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       await this.client?.cancel();
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: `停止に失敗しました: ${message}` });
+      this.post({ type: "error", text: this.uiText(`停止に失敗しました: ${message}`, `Failed to stop: ${message}`) });
       this.stopping = false;
       this.busy = false;
       this.post({ type: "running", running: false });
@@ -1168,7 +1238,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.replayAssistantOpen = false;
     this.post({ type: "clear" });
     this.postChangeReview();
-    this.post({ type: "init", status: "loading", message: "新しいチャットを準備中..." });
+    this.post({ type: "init", status: "loading", message: this.uiText("新しいチャットを準備中...", "Preparing a new chat...") });
 
     const epoch = this.connectEpoch;
 
@@ -1190,8 +1260,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "init", status: "error", message: `新しいチャットの開始に失敗: ${message}` });
-      this.post({ type: "error", text: `新しいチャットの開始に失敗: ${message}` });
+      const errorMessage = this.uiText(`新しいチャットの開始に失敗: ${message}`, `Failed to start a new chat: ${message}`);
+      this.post({ type: "init", status: "error", message: errorMessage });
+      this.post({ type: "error", text: errorMessage });
 
       if (this.client) {
         this.abandonClient(this.client);
@@ -1218,7 +1289,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleRequestContextPreview(text: string): Promise<void> {
     const root = this.workspaceRoot || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || process.cwd();
     try {
-      const items = await getPromptContextPreview(text, root);
+      const items = await getPromptContextPreview(text, root, this.locale);
       this.post({ type: "contextPreview", text, items });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1307,9 +1378,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "chat.css"));
     const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, "media", "chat.js"));
     const nonce = getNonce();
+    const language = this.locale;
 
     return `<!DOCTYPE html>
-<html lang="ja">
+<html lang="${language}">
 <head>
   <meta charset="UTF-8" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; img-src data: blob:;" />
@@ -1319,19 +1391,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 </head>
 <body>
   <div class="top-bar">
-    <button id="historyBtn" class="top-btn history-btn" type="button" title="チャット履歴" disabled>
+    <button id="historyBtn" class="top-btn history-btn" type="button" title="${this.uiText("チャット履歴", "Chat history")}" disabled>
       <svg class="btn-svg" width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.5"/>
         <path d="M8 4.5V8l2.5 1.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
       </svg>
-      <span id="historyLabel">履歴</span>
+      <span id="historyLabel">${this.uiText("履歴", "History")}</span>
       <span class="pill-chevron">▾</span>
     </button>
     <div class="top-actions">
-      <button id="usageBtn" class="top-btn" type="button" title="Cursor 使用量ダッシュボードを開く">使用量</button>
-      <button id="changesBtn" class="top-btn" type="button" title="変更レビュー">変更</button>
-      <button id="permissionsBtn" class="top-btn" type="button" title="権限ルール">権限</button>
-      <button id="newChat" class="top-btn new-chat-btn" type="button" title="新しいチャット">
+      <button id="usageBtn" class="top-btn" type="button" title="${this.uiText("Cursor 使用量ダッシュボードを開く", "Open the Cursor usage dashboard")}">${this.uiText("使用量", "Usage")}</button>
+      <button id="changesBtn" class="top-btn" type="button" title="${this.uiText("変更レビュー", "Change review")}">${this.uiText("変更", "Changes")}</button>
+      <button id="permissionsBtn" class="top-btn" type="button" title="${this.uiText("権限ルール", "Permission rules")}">${this.uiText("権限", "Permissions")}</button>
+      <button id="newChat" class="top-btn new-chat-btn" type="button" title="${this.uiText("新しいチャット", "New chat")}">
         <svg class="btn-svg" width="11" height="11" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M8 2v12M2 8h12" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
         </svg>
@@ -1346,12 +1418,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div class="boot-card">
       <div class="boot-main">
         <span class="boot-spinner"></span>
-        <span id="bootLabel">エージェントに接続中...</span>
+        <span id="bootLabel">${this.uiText("エージェントに接続中...", "Connecting to the agent...")}</span>
       </div>
       <div id="bootActions" class="boot-actions hidden">
-        <button id="retryConnectBtn" class="boot-action" type="button">再接続</button>
-        <button id="diagnoseBtn" class="boot-action" type="button">診断</button>
-        <button id="openSettingsBtn" class="boot-action" type="button">設定</button>
+        <button id="retryConnectBtn" class="boot-action" type="button">${this.uiText("再接続", "Reconnect")}</button>
+        <button id="diagnoseBtn" class="boot-action" type="button">${this.uiText("診断", "Diagnostics")}</button>
+        <button id="openSettingsBtn" class="boot-action" type="button">${this.uiText("設定", "Settings")}</button>
       </div>
       <div id="diagnosticsPanel" class="diagnostics-panel hidden"></div>
     </div>
@@ -1360,14 +1432,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <main id="thread" class="thread" aria-live="polite"></main>
     <div id="emptyState" class="empty-state">
       <div class="empty-title">Cursor Agent</div>
-      <div class="empty-sub">コードについて質問したり、編集やタスクを依頼できます</div>
+      <div class="empty-sub">${this.uiText("コードについて質問したり、編集やタスクを依頼できます", "Ask about your code, request edits, or assign tasks")}</div>
       <ul class="empty-hints">
-        <li><kbd>@</kbd><span>ファイル・フォルダをコンテキストに追加</span></li>
-        <li><kbd>/</kbd><span>コマンド・スキルを呼び出す</span></li>
-        <li><kbd>Shift</kbd><span class="kbd-plus">+</span><kbd>Enter</kbd><span>改行を挿入</span></li>
+        <li><kbd>@</kbd><span>${this.uiText("ファイル・フォルダをコンテキストに追加", "Add files and folders as context")}</span></li>
+        <li><kbd>/</kbd><span>${this.uiText("コマンド・スキルを呼び出す", "Invoke commands and skills")}</span></li>
+        <li><kbd>Shift</kbd><span class="kbd-plus">+</span><kbd>Enter</kbd><span>${this.uiText("改行を挿入", "Insert a new line")}</span></li>
       </ul>
     </div>
-    <button id="jumpBottom" class="jump-bottom hidden" type="button" title="最新のメッセージへ">
+    <button id="jumpBottom" class="jump-bottom hidden" type="button" title="${this.uiText("最新のメッセージへ", "Jump to the latest message")}">
       <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
         <path d="M8 3v10M3.5 8.5 8 13l4.5-4.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
       </svg>
@@ -1376,26 +1448,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="taskStatus" class="task-status hidden" role="status">
     <span class="task-label">
       <span class="task-spinner"></span>
-      <span id="taskLabel">エージェント実行中...</span>
+      <span id="taskLabel">${this.uiText("エージェント実行中...", "Agent is running...")}</span>
     </span>
-    <span class="task-hint"><kbd>Esc</kbd> で停止</span>
+    <span class="task-hint"><kbd>Esc</kbd> ${this.uiText("で停止", "to stop")}</span>
   </div>
   <footer class="composer-dock">
     <div id="modeMenu" class="picker-menu hidden" role="menu"></div>
     <div id="modelMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
     <div id="suggestMenu" class="suggest-menu hidden" role="listbox"></div>
     <div class="composer-card">
-      <div id="contextTray" class="context-tray hidden" aria-label="添付コンテキスト"></div>
-      <div id="attachmentTray" class="attachment-tray hidden" aria-label="添付画像"></div>
-      <textarea id="input" rows="1" placeholder="質問や指示を入力（@ でコンテキスト、画像貼り付け可）"></textarea>
+      <div id="contextTray" class="context-tray hidden" aria-label="${this.uiText("添付コンテキスト", "Attached context")}"></div>
+      <div id="attachmentTray" class="attachment-tray hidden" aria-label="${this.uiText("添付画像", "Attached images")}"></div>
+      <textarea id="input" rows="1" placeholder="${this.uiText("質問や指示を入力（@ でコンテキスト、画像貼り付け可）", "Ask a question or enter an instruction (@ for context, paste images)")}"></textarea>
       <div class="composer-footer">
         <div class="composer-meta">
-          <button id="modePill" class="pill" type="button" title="モード">
+          <button id="modePill" class="pill" type="button" title="${this.uiText("モード", "Mode")}">
             <span class="pill-icon">∞</span>
             <span class="pill-label">Agent</span>
             <span class="pill-chevron">▾</span>
           </button>
-          <button id="modelPill" class="pill pill-model" type="button" title="モデル">
+          <button id="modelPill" class="pill pill-model" type="button" title="${this.uiText("モデル", "Model")}">
             <span class="pill-label">Auto</span>
             <span class="pill-chevron">▾</span>
           </button>
@@ -1403,7 +1475,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
             id="autoRunPill"
             class="pill pill-autorun"
             type="button"
-            title="自動実行 OFF — クリックで ON（--yolo 相当）"
+            title="${this.uiText("自動実行 OFF — クリックで ON（--yolo 相当）", "Auto-run OFF — click to enable (--yolo equivalent)")}"
             aria-pressed="false"
             disabled
           >
@@ -1416,7 +1488,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           <button id="stopBtn" class="icon-btn stop-btn-round hidden" type="button" title="Stop (Esc)">
             <span class="stop-icon"></span>
           </button>
-          <button id="send" class="icon-btn send-btn" type="button" title="送信 (Enter)">
+          <button id="send" class="icon-btn send-btn" type="button" title="${this.uiText("送信 (Enter)", "Send (Enter)")}">
             <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true">
               <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
             </svg>

@@ -19,6 +19,8 @@ export interface PromptContextPreviewItem {
   chars: number;
 }
 
+type UiLocale = "ja" | "en";
+
 const AT_REF = /@([^\s@]+)/g;
 const SLASH_PREFIX = /^\/([\w-]+)(?:\s+([\s\S]*))?$/;
 
@@ -125,7 +127,8 @@ export async function buildPromptBlocks(
 
 export async function getPromptContextPreview(
   rawText: string,
-  workspaceRoot: string
+  workspaceRoot: string,
+  locale: UiLocale = "en"
 ): Promise<PromptContextPreviewItem[]> {
   const trimmed = rawText.trim();
   if (!trimmed) {
@@ -144,7 +147,7 @@ export async function getPromptContextPreview(
       label: `/${name}`,
       kind: slashBody ? "command" : "missing",
       status: slashBody ? "ready" : "missing",
-      detail: slashBody ? "Command / Skill" : "見つかりません",
+      detail: slashBody ? "Command / Skill" : locale === "ja" ? "見つかりません" : "Not found",
       chars: slashBody?.length ?? 0,
     });
   }
@@ -204,7 +207,7 @@ export async function getPromptContextPreview(
       label,
       kind: "missing",
       status: "missing",
-      detail: "見つかりません",
+      detail: locale === "ja" ? "見つかりません" : "Not found",
       chars: 0,
     });
   }
