@@ -1,5 +1,54 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">
-  <rect width="24" height="24" rx="4" fill="#1e1e1e"/>
-  <path d="M7 8h10M7 12h7M7 16h10" stroke="#cccccc" stroke-width="1.5" stroke-linecap="round"/>
-  <circle cx="17" cy="16" r="3" fill="#3794ff"/>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 128 128"
+     width="128"
+     height="128"
+     shape-rendering="crispEdges">
+  <title>Cursor Agent Sidebar</title>
+
+  <!-- Outer app tile -->
+  <rect x="2" y="2" width="124" height="124" rx="22"
+        fill="#081014"
+        stroke="#213A43"
+        stroke-width="4"/>
+
+  <!-- Editor frame -->
+  <rect x="10" y="16" width="106" height="96"
+        fill="#25363E"/>
+
+  <!-- Main editor surface -->
+  <rect x="18" y="24" width="66" height="80"
+        fill="#0A1116"/>
+
+  <!-- Right sidebar accent -->
+  <rect x="84" y="16" width="32" height="96"
+        fill="#20DDB8"/>
+
+  <!-- Sidebar inner surface -->
+  <rect x="88" y="24" width="24" height="80"
+        fill="#0B2824"/>
+
+  <!-- Cursor-inspired white pixel shape -->
+  <polygon
+    points="22,31 79,31 47,76 47,47"
+    fill="#FFFFFF"/>
+
+  <!-- Editor lines -->
+  <rect x="22" y="78" width="22" height="4" fill="#183039"/>
+  <rect x="22" y="88" width="32" height="4" fill="#183039"/>
+  <rect x="22" y="98" width="20" height="4" fill="#183039"/>
+
+  <!-- Pixel sparkle -->
+  <g fill="#BFFFEA">
+    <rect x="98" y="30" width="4" height="20"/>
+    <rect x="90" y="38" width="20" height="4"/>
+  </g>
+  <rect x="94" y="34" width="12" height="12" fill="#62F2CB"/>
+  <rect x="98" y="38" width="4" height="4" fill="#FFFFFF"/>
+
+  <!-- Sidebar controls -->
+  <rect x="94" y="62" width="14" height="4" fill="#2EE5D2"/>
+  <rect x="94" y="72" width="6" height="6" fill="#2EE5D2"/>
+  <rect x="104" y="72" width="6" height="6" fill="#2EE5D2"/>
+  <rect x="94" y="84" width="16" height="4" fill="#8B72FF"/>
+  <rect x="94" y="94" width="10" height="4" fill="#2EE5D2"/>
 </svg>
