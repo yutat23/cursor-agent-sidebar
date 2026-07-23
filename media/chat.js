@@ -44,6 +44,8 @@
     imageTooLarge: ["画像は 5MB 以下にしてください", "Images must be 5 MB or smaller"],
     maxImages: ["画像は最大 {0} 枚までです", "You can attach up to {0} images"],
     imageLoadFailed: ["画像の読み込みに失敗しました", "Failed to load image"],
+    openImage: ["クリックして拡大表示", "Click to enlarge"],
+    closeImage: ["閉じる", "Close"],
     openFile: ["クリックしてファイルを開く", "Click to open file"],
     historyLoadFailed: ["このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。", "The display history for this session could not be loaded. The agent state was restored, so you can continue sending messages."],
   };
@@ -87,6 +89,9 @@
   const jumpBottom = document.getElementById("jumpBottom");
   const contextTray = document.getElementById("contextTray");
   const attachmentTray = document.getElementById("attachmentTray");
+  const imageLightbox = document.getElementById("imageLightbox");
+  const imageLightboxImg = document.getElementById("imageLightboxImg");
+  const imageLightboxClose = document.getElementById("imageLightboxClose");
 
   const MAX_IMAGE_ATTACHMENTS = 4;
   const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
@@ -544,16 +549,21 @@
     modePill.querySelector(".pill-icon").textContent = config.currentModeIcon || MODE_ICONS[config.currentModeId] || "∞";
     modePill.querySelector(".pill-label").textContent = config.currentModeLabel || config.currentModeId;
     modelPill.querySelector(".pill-label").textContent = config.currentModelLabel || "Auto";
+    modelPill.title = config.currentModelLabel || "Model";
     if (typeof config.autoApprovePermissions === "boolean") {
       applyAutoRun(config.autoApprovePermissions);
     }
     if (openMenu === "model") {
       const search = modelMenu.querySelector(".picker-search");
+      const filter = search ? search.value : "";
+      renderModelMenu(filter);
       if (search) {
-        updateModelMenuList(search.value);
-      } else {
-        renderModelMenu("");
-        modelMenu.querySelector(".picker-search")?.focus();
+        const nextSearch = modelMenu.querySelector(".picker-search");
+        if (nextSearch) {
+          nextSearch.value = filter;
+          nextSearch.focus();
+          nextSearch.setSelectionRange(filter.length, filter.length);
+        }
       }
     }
   }
@@ -795,7 +805,6 @@
         ${model.id === sessionConfig.currentModelId ? '<span class="picker-check">✓</span>' : ""}
       `;
       btn.addEventListener("click", () => {
-        closeMenus();
         if (model.id !== sessionConfig.currentModelId) {
           vscode.postMessage({ type: "setModel", modelId: model.id });
         }
@@ -808,6 +817,71 @@
       empty.className = "picker-empty";
       empty.textContent = "No models found";
       list.appendChild(empty);
+    }
+  }
+
+  function renderModelParameters() {
+    const existing = modelMenu.querySelector(".model-params");
+    if (existing) {
+      existing.remove();
+    }
+
+    const params = sessionConfig?.modelParameters || [];
+    if (!params.length || sessionConfig.currentModelId === "default") {
+      return;
+    }
+
+    const section = document.createElement("div");
+    section.className = "model-params";
+
+    const header = document.createElement("div");
+    header.className = "model-params-header";
+    header.textContent = "Parameters";
+    section.appendChild(header);
+
+    for (const param of params) {
+      const row = document.createElement("div");
+      row.className = "model-param-row";
+
+      const label = document.createElement("div");
+      label.className = "model-param-label";
+      label.textContent = param.name || param.id;
+      row.appendChild(label);
+
+      const chips = document.createElement("div");
+      chips.className = "model-param-chips";
+
+      for (const option of param.options || []) {
+        const chip = document.createElement("button");
+        chip.type = "button";
+        chip.className =
+          "model-param-chip" + (option.value === param.currentValue ? " is-selected" : "");
+        chip.textContent = option.name || option.value;
+        chip.title = param.description || `${param.name}: ${option.name || option.value}`;
+        chip.addEventListener("click", (e) => {
+          e.stopPropagation();
+          if (option.value !== param.currentValue) {
+            vscode.postMessage({
+              type: "setModelParameter",
+              configId: param.id,
+              value: option.value,
+            });
+          }
+        });
+        chips.appendChild(chip);
+      }
+
+      row.appendChild(chips);
+      section.appendChild(row);
+    }
+
+    const search = modelMenu.querySelector(".picker-search");
+    if (search && search.nextSibling) {
+      modelMenu.insertBefore(section, search.nextSibling);
+    } else if (search) {
+      modelMenu.appendChild(section);
+    } else {
+      modelMenu.insertBefore(section, modelMenu.firstChild);
     }
   }
 
@@ -828,6 +902,7 @@
     search.addEventListener("keydown", (e) => e.stopPropagation());
     modelMenu.appendChild(search);
 
+    renderModelParameters();
     updateModelMenuList(filter || "");
   }
 
@@ -1295,6 +1370,52 @@
     el.classList.add("rendered");
   }
 
+  function openImageLightbox(src, alt) {
+    if (!imageLightbox || !imageLightboxImg || !src) {
+      return;
+    }
+    imageLightboxImg.src = src;
+    imageLightboxImg.alt = alt || "Attached image";
+    imageLightbox.classList.remove("hidden");
+    imageLightbox.setAttribute("aria-hidden", "false");
+    imageLightboxClose?.focus();
+  }
+
+  function closeImageLightbox() {
+    if (!imageLightbox || imageLightbox.classList.contains("hidden")) {
+      return;
+    }
+    imageLightbox.classList.add("hidden");
+    imageLightbox.setAttribute("aria-hidden", "true");
+    if (imageLightboxImg) {
+      imageLightboxImg.removeAttribute("src");
+      imageLightboxImg.alt = "";
+    }
+  }
+
+  function isImageLightboxOpen() {
+    return Boolean(imageLightbox && !imageLightbox.classList.contains("hidden"));
+  }
+
+  function bindImagePreview(img, src, alt) {
+    img.classList.add("is-zoomable");
+    img.title = t("openImage");
+    img.setAttribute("role", "button");
+    img.tabIndex = 0;
+    const open = () => openImageLightbox(src || img.src, alt || img.alt);
+    img.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      open();
+    });
+    img.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        open();
+      }
+    });
+  }
+
   function appendUserMessage(text, images) {
     const turn = ensureTurn("user");
     const label = document.createElement("div");
@@ -1317,8 +1438,10 @@
       for (const image of images) {
         const img = document.createElement("img");
         img.className = "user-image";
-        img.src = `data:${image.mimeType};base64,${image.data}`;
+        const src = `data:${image.mimeType};base64,${image.data}`;
+        img.src = src;
         img.alt = "Attached image";
+        bindImagePreview(img, src, img.alt);
         gallery.appendChild(img);
       }
       body.appendChild(gallery);
@@ -1381,13 +1504,15 @@
       const preview = document.createElement("img");
       preview.src = attachment.dataUrl;
       preview.alt = attachment.name || "Attached image";
+      bindImagePreview(preview, attachment.dataUrl, preview.alt);
 
       const removeBtn = document.createElement("button");
       removeBtn.type = "button";
       removeBtn.className = "attachment-remove";
       removeBtn.setAttribute("aria-label", "Remove image");
       removeBtn.textContent = "×";
-      removeBtn.addEventListener("click", () => {
+      removeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
         pendingAttachments = pendingAttachments.filter((item) => item.id !== attachment.id);
         renderAttachmentTray();
       });
@@ -1725,6 +1850,10 @@
 
     if (e.key === "Escape") {
       e.preventDefault();
+      if (isImageLightboxOpen()) {
+        closeImageLightbox();
+        return;
+      }
       requestCancel();
       return;
     }
@@ -1823,6 +1952,11 @@
 
   document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") {
+      if (isImageLightboxOpen()) {
+        e.preventDefault();
+        closeImageLightbox();
+        return;
+      }
       if (openMenu) {
         e.preventDefault();
         closeMenus();
@@ -1833,6 +1967,18 @@
         requestCancel();
       }
     }
+  });
+
+  imageLightbox?.addEventListener("click", (e) => {
+    if (e.target === imageLightbox || e.target === imageLightboxClose) {
+      closeImageLightbox();
+    }
+  });
+
+  imageLightboxClose?.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    closeImageLightbox();
   });
 
   window.addEventListener("message", (event) => {

@@ -268,6 +268,61 @@ kbd {
   background: rgba(0, 0, 0, 0.12);
 }
 
+.user-image.is-zoomable,
+.attachment-chip img.is-zoomable {
+  cursor: zoom-in;
+}
+
+.user-image.is-zoomable:hover,
+.attachment-chip img.is-zoomable:hover {
+  outline: 1px solid color-mix(in srgb, var(--vscode-focusBorder, #0078d4) 70%, transparent);
+  outline-offset: 1px;
+}
+
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: color-mix(in srgb, #000 72%, transparent);
+  backdrop-filter: blur(2px);
+}
+
+.image-lightbox.hidden {
+  display: none;
+}
+
+.image-lightbox-img {
+  max-width: min(100%, 920px);
+  max-height: calc(100vh - 64px);
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.image-lightbox-close {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, #fff 28%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #000 45%, transparent);
+  color: #fff;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.image-lightbox-close:hover {
+  background: color-mix(in srgb, #000 65%, transparent);
+}
+
 .turn-assistant {
   gap: 4px;
   align-items: stretch;
@@ -1235,12 +1290,17 @@ kbd {
   white-space: nowrap;
   max-width: 120px;
   overflow: hidden;
-  text-overflow: ellipsis;
   transition: background 0.12s ease, border-color 0.12s ease;
 }
 
+.pill .pill-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .pill-model {
-  max-width: 150px;
+  max-width: 240px;
 }
 
 .pill-autorun {
@@ -1380,9 +1440,9 @@ kbd {
 }
 
 .picker-menu-wide {
-  min-width: 220px;
-  max-width: 280px;
-  max-height: 280px;
+  min-width: 240px;
+  max-width: 300px;
+  max-height: 360px;
 }
 
 .picker-search {
@@ -1399,6 +1459,63 @@ kbd {
 
 .picker-search:focus {
   border-color: var(--vscode-focusBorder, var(--vscode-input-border));
+}
+
+.model-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 2px 2px 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid color-mix(in srgb, var(--vscode-panel-border) 70%, transparent);
+}
+
+.model-params-header {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: var(--vscode-descriptionForeground);
+  padding: 0 2px;
+}
+
+.model-param-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-param-label {
+  font-size: 11.5px;
+  color: var(--vscode-foreground);
+  padding: 0 2px;
+}
+
+.model-param-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.model-param-chip {
+  border: 1px solid color-mix(in srgb, var(--vscode-panel-border) 80%, transparent);
+  background: color-mix(in srgb, var(--vscode-input-background) 70%, transparent);
+  color: var(--vscode-foreground);
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1.3;
+}
+
+.model-param-chip:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.model-param-chip.is-selected {
+  border-color: color-mix(in srgb, var(--vscode-focusBorder, var(--vscode-button-background)) 70%, var(--vscode-panel-border));
+  background: color-mix(in srgb, var(--vscode-button-background) 22%, transparent);
+  color: var(--vscode-foreground);
 }
 
 .picker-list {

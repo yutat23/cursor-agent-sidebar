@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { AcpClient, AgentMode, validateAgentPath } from "./acpClient";
-import { AcpSessionInfo, formatModelDisplayName, SessionPickerConfig } from "./sessionConfig";
+import { AcpSessionInfo, formatCurrentModelLabel, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
 import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
@@ -17,6 +17,7 @@ type WebviewMessage =
   | { type: "cancel" }
   | { type: "setMode"; modeId: AgentMode }
   | { type: "setModel"; modelId: string }
+  | { type: "setModelParameter"; configId: string; value: string }
   | { type: "permissionResponse"; id: string; decision: string }
   | { type: "requestPermissionState" }
   | { type: "removePermissionRule"; id: string }
@@ -162,7 +163,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private busy = false;
   private stopping = false;
   private mode: AgentMode = "agent";
-  private modelId = "default[]";
+  private modelId = "default";
   private sessionConfig?: SessionPickerConfig;
   private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
@@ -181,7 +182,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly extensionContext: vscode.ExtensionContext
   ) {
     this.mode = extensionContext.globalState.get<AgentMode>("cursorAgent.mode", "agent");
-    this.modelId = extensionContext.globalState.get<string>("cursorAgent.modelId", "default[]");
+    this.modelId = extensionContext.globalState.get<string>("cursorAgent.modelId", "default");
   }
 
   private uiText(japanese: string, english: string): string {
@@ -227,6 +228,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "setModel":
           await this.handleSetModel(msg.modelId);
+          break;
+        case "setModelParameter":
+          await this.handleSetModelParameter(msg.configId, msg.value);
           break;
         case "permissionResponse":
           await this.resolvePermission(msg.id, msg.decision);
@@ -692,6 +696,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private async handleSetModelParameter(configId: string, value: string): Promise<void> {
+    if (this.busy) {
+      return;
+    }
+
+    try {
+      await this.ensureClient();
+      this.sessionConfig = await this.client!.setModelParameter(configId, value);
+      this.modelId = this.sessionConfig.currentModelId;
+      await this.savePreferences();
+      this.postConfig();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({
+        type: "error",
+        text: this.uiText(`モデル設定の変更に失敗: ${message}`, `Failed to change model setting: ${message}`),
+      });
+    }
+  }
+
   private async savePreferences(): Promise<void> {
     await this.extensionContext.globalState.update("cursorAgent.mode", this.mode);
     await this.extensionContext.globalState.update("cursorAgent.modelId", this.modelId);
@@ -1027,10 +1051,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       sessionId: this.client?.currentSessionId ?? this.sessionConfig.sessionId,
       modes: this.sessionConfig.modes,
       models: this.sessionConfig.models,
+      modelParameters: this.sessionConfig.modelParameters,
       currentModeId: this.sessionConfig.currentModeId,
       currentModelId: this.sessionConfig.currentModelId,
       currentModeLabel: currentMode?.name ?? this.sessionConfig.currentModeId,
-      currentModelLabel: currentModel?.name ?? formatModelDisplayName(this.sessionConfig.currentModelId, ""),
+      currentModelLabel: formatCurrentModelLabel(
+        this.sessionConfig.currentModelId,
+        currentModel?.name,
+        this.sessionConfig.modelParameters
+      ),
       currentModeIcon: MODE_ICONS[this.sessionConfig.currentModeId] ?? "∞",
       autoApprovePermissions: this.getAutoApprovePermissions(),
       busy: this.busy,
@@ -1497,6 +1526,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       </div>
     </div>
   </footer>
+  <div id="imageLightbox" class="image-lightbox hidden" aria-hidden="true" role="dialog" aria-modal="true" aria-label="${this.uiText("画像プレビュー", "Image preview")}">
+    <button id="imageLightboxClose" class="image-lightbox-close" type="button" title="${this.uiText("閉じる", "Close")}" aria-label="${this.uiText("閉じる", "Close")}">×</button>
+    <img id="imageLightboxImg" class="image-lightbox-img" alt="" />
+  </div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

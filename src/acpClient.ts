@@ -3,7 +3,9 @@ import * as readline from "node:readline";
 import { EventEmitter } from "node:events";
 import {
   AcpSessionInfo,
+  normalizeModelId,
   parseConfigOptions,
+  parseModelIdParameters,
   parseSessionConfig,
   SessionPickerConfig,
 } from "./sessionConfig";
@@ -127,6 +129,9 @@ export class AcpClient extends EventEmitter {
       clientCapabilities: {
         fs: { readTextFile: false, writeTextFile: false },
         terminal: false,
+        _meta: {
+          parameterizedModelPicker: true,
+        },
       },
       clientInfo: { name: "cursor-agent-sidebar", version: "0.1.0" },
     })) as {
@@ -182,18 +187,32 @@ export class AcpClient extends EventEmitter {
   }
 
   async newSession(mode: AgentMode = "agent", modelId?: string): Promise<SessionPickerConfig> {
+    const preferredModelId = modelId ? normalizeModelId(modelId) : undefined;
+    const preferredParams = modelId ? parseModelIdParameters(modelId) : [];
+
     const result = (await this.send("session/new", {
       cwd: this.options.cwd,
       mcpServers: [],
       mode,
-      ...(modelId ? { model: modelId } : {}),
+      ...(preferredModelId ? { model: preferredModelId } : {}),
     })) as Parameters<typeof parseSessionConfig>[0];
 
     this.sessionId = result.sessionId;
     let config = parseSessionConfig(result);
 
-    if (modelId && config.currentModelId !== modelId) {
-      config = await this.setModel(modelId);
+    if (preferredModelId && config.currentModelId !== preferredModelId) {
+      config = await this.setModel(preferredModelId);
+    }
+
+    for (const param of preferredParams) {
+      const current = config.modelParameters.find((p) => p.id === param.id);
+      if (!current || current.currentValue === param.value) {
+        continue;
+      }
+      if (!current.options.some((o) => o.value === param.value)) {
+        continue;
+      }
+      config = await this.setModelParameter(param.id, param.value);
     }
 
     return config;
@@ -215,6 +234,7 @@ export class AcpClient extends EventEmitter {
   }
 
   async setModel(modelId: string): Promise<SessionPickerConfig> {
+    const normalized = normalizeModelId(modelId);
     if (!this.sessionId) {
       return this.newSession("agent", modelId);
     }
@@ -222,7 +242,21 @@ export class AcpClient extends EventEmitter {
     const result = (await this.send("session/set_config_option", {
       sessionId: this.sessionId,
       configId: "model",
-      value: modelId,
+      value: normalized,
+    })) as { configOptions: Parameters<typeof parseConfigOptions>[0] };
+
+    return parseConfigOptions(result.configOptions);
+  }
+
+  async setModelParameter(configId: string, value: string): Promise<SessionPickerConfig> {
+    if (!this.sessionId) {
+      throw new Error("No active session");
+    }
+
+    const result = (await this.send("session/set_config_option", {
+      sessionId: this.sessionId,
+      configId,
+      value,
     })) as { configOptions: Parameters<typeof parseConfigOptions>[0] };
 
     return parseConfigOptions(result.configOptions);
