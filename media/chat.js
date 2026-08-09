@@ -129,6 +129,7 @@
   let activityPanel = null;
   let responsePanel = null;
   let thinkingStart = 0;
+  let pendingMarkdownRender = 0;
 
   const MODE_ICONS = { agent: "∞", plan: "☰", ask: "?" };
 
@@ -1747,7 +1748,14 @@
     return out.join("");
   }
 
-  function renderAssistantContent(el) {
+  function cancelPendingMarkdownRender() {
+    if (pendingMarkdownRender) {
+      cancelAnimationFrame(pendingMarkdownRender);
+      pendingMarkdownRender = 0;
+    }
+  }
+
+  function renderAssistantContent(el, { withCopy = true } = {}) {
     const text = el.__raw ?? el.textContent ?? "";
     if (!text.trim()) {
       return;
@@ -1755,8 +1763,33 @@
 
     el.__raw = text;
     el.innerHTML = renderMarkdown(text);
-    attachMessageCopy(el, text);
+    if (withCopy) {
+      attachMessageCopy(el, text);
+    }
     el.classList.add("rendered");
+  }
+
+  function scheduleAssistantMarkdownRender(el, { final = false } = {}) {
+    if (!el) {
+      return;
+    }
+
+    if (final) {
+      cancelPendingMarkdownRender();
+      renderAssistantContent(el, { withCopy: true });
+      scrollToBottom();
+      return;
+    }
+
+    if (pendingMarkdownRender) {
+      return;
+    }
+
+    pendingMarkdownRender = requestAnimationFrame(() => {
+      pendingMarkdownRender = 0;
+      renderAssistantContent(el, { withCopy: false });
+      scrollToBottom();
+    });
   }
 
   function openImageLightbox(src, alt) {
@@ -2149,6 +2182,7 @@
   }
 
   function resetTurnState() {
+    cancelPendingMarkdownRender();
     currentTurn = null;
     currentAssistantEl = null;
     currentThinkingEl = null;
@@ -2401,13 +2435,8 @@
       case "assistantChunk": {
         currentThinkingEl?.classList.remove("is-live");
         const el = ensureAssistantText();
-        if (el.classList.contains("rendered")) {
-          el.classList.remove("rendered");
-          el.textContent = el.__raw || el.textContent || "";
-          el.__raw = undefined;
-        }
-        el.textContent += msg.text;
-        scrollToBottom();
+        el.__raw = (el.__raw || "") + (msg.text || "");
+        scheduleAssistantMarkdownRender(el);
         break;
       }
 
@@ -2463,7 +2492,7 @@
         settleThoughtBlocks();
         if (currentAssistantEl) {
           currentAssistantEl.classList.remove("typing");
-          renderAssistantContent(currentAssistantEl);
+          scheduleAssistantMarkdownRender(currentAssistantEl, { final: true });
         }
         const note = document.createElement("div");
         note.className = "system-note";
@@ -2480,7 +2509,7 @@
         settleThoughtBlocks();
         if (currentAssistantEl) {
           currentAssistantEl.classList.remove("typing");
-          renderAssistantContent(currentAssistantEl);
+          scheduleAssistantMarkdownRender(currentAssistantEl, { final: true });
         }
         resetTurnState();
         setRunning(false, false);
@@ -2605,7 +2634,10 @@
         err.className = "error-note";
         err.textContent = msg.text;
         threadEl.appendChild(err);
-        if (currentAssistantEl) currentAssistantEl.classList.remove("typing");
+        if (currentAssistantEl) {
+          currentAssistantEl.classList.remove("typing");
+          scheduleAssistantMarkdownRender(currentAssistantEl, { final: true });
+        }
         resetTurnState();
         setRunning(false, false);
         scrollToBottom();
