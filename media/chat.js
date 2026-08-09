@@ -1318,6 +1318,35 @@
     });
   }
 
+  function createMessageCopyButton() {
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "copy-btn msg-copy";
+    copyBtn.title = t("copyMessage");
+    copyBtn.setAttribute("aria-label", t("copyMessage"));
+    copyBtn.innerHTML = COPY_ICON;
+    return copyBtn;
+  }
+
+  function attachMessageCopy(hostEl, rawText) {
+    if (!hostEl || !rawText?.trim()) {
+      return;
+    }
+    hostEl.__raw = rawText;
+    hostEl.classList.add("has-message-copy");
+
+    let actions = hostEl.querySelector(":scope > .message-actions");
+    if (!actions) {
+      actions = document.createElement("div");
+      actions.className = "message-actions";
+      hostEl.appendChild(actions);
+    }
+
+    if (!actions.querySelector(".msg-copy")) {
+      actions.appendChild(createMessageCopyButton());
+    }
+  }
+
   // コードブロック・メッセージのコピーボタン（イベント委譲）
   threadEl.addEventListener("click", (e) => {
     const codeCopy = e.target.closest(".code-copy");
@@ -1330,8 +1359,14 @@
     const msgCopy = e.target.closest(".msg-copy");
     if (msgCopy) {
       e.stopPropagation();
-      const msgEl = msgCopy.closest(".assistant-text");
-      copyToClipboard(msgEl?.__raw ?? msgEl?.textContent ?? "", msgCopy);
+      const host =
+        msgCopy.closest(".has-message-copy") ||
+        msgCopy.closest(".assistant-text") ||
+        msgCopy.closest(".user-message-body");
+      const text = host?.__raw ?? host?.querySelector(".user-text")?.textContent ?? "";
+      if (text.trim()) {
+        copyToClipboard(text, msgCopy);
+      }
     }
   });
 
@@ -1720,14 +1755,7 @@
 
     el.__raw = text;
     el.innerHTML = renderMarkdown(text);
-
-    const copyBtn = document.createElement("button");
-    copyBtn.type = "button";
-    copyBtn.className = "copy-btn msg-copy";
-    copyBtn.title = t("copyMessage");
-    copyBtn.innerHTML = COPY_ICON;
-    el.appendChild(copyBtn);
-
+    attachMessageCopy(el, text);
     el.classList.add("rendered");
   }
 
@@ -1806,6 +1834,10 @@
         gallery.appendChild(img);
       }
       body.appendChild(gallery);
+    }
+
+    if (text?.trim()) {
+      attachMessageCopy(body, text);
     }
 
     turn.appendChild(label);

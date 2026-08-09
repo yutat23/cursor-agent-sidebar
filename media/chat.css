@@ -251,6 +251,32 @@ kbd {
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
+.message-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 22px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.turn-user .message-actions {
+  justify-content: flex-end;
+  padding-right: 2px;
+}
+
+.turn-assistant .message-actions {
+  justify-content: flex-start;
+  margin-top: 2px;
+}
+
+.turn-user:hover .message-actions,
+.turn-assistant:hover .message-actions,
+.message-actions:focus-within,
+.message-actions:has(.msg-copy.copied) {
+  opacity: 1;
+}
+
 .user-images {
   display: flex;
   flex-wrap: wrap;
@@ -520,18 +546,17 @@ kbd {
 }
 
 .msg-copy {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  opacity: 0;
-  transition: opacity 0.12s;
-  background: var(--vscode-editor-background);
+  width: 24px;
+  height: 22px;
+  opacity: 0.85;
 }
 
-.assistant-text:hover .msg-copy,
-.msg-copy:focus-visible,
-.msg-copy.copied {
-  opacity: 0.85;
+.assistant-text.has-message-copy {
+  position: relative;
+}
+
+.assistant-text .message-actions {
+  position: static;
 }
 
 /* コードブロック右上のコピーボタン（ホバーで言語ラベルと入れ替わり表示） */
