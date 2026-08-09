@@ -1,4 +1,7 @@
 import { execFile } from "node:child_process";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -8,6 +11,8 @@ const USAGE_API_URL = `${API_BASE}/GetCurrentPeriodUsage`;
 const PLAN_INFO_API_URL = `${API_BASE}/GetPlanInfo`;
 const KEYCHAIN_SERVICE = "cursor-access-token";
 const KEYCHAIN_ACCOUNT = "cursor-user";
+/** Cursor CLI credential domain; Windows title-cases this to `Cursor`. */
+const CREDENTIAL_DOMAIN = "cursor";
 
 export interface CursorUsageSnapshot {
   fetchedAt: string;
@@ -85,10 +90,14 @@ async function resolveAccessToken(): Promise<string> {
       return await readMacOsKeychainToken();
     }
     if (process.platform === "linux") {
-      return await readLinuxSecretToken();
+      try {
+        return await readAuthFileToken();
+      } catch {
+        return await readLinuxSecretToken();
+      }
     }
     if (process.platform === "win32") {
-      return await readWindowsCredentialToken();
+      return await readAuthFileToken();
     }
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
@@ -96,6 +105,57 @@ async function resolveAccessToken(): Promise<string> {
   }
 
   throw new UsageError("Unsupported platform for Cursor CLI credential lookup.");
+}
+
+/**
+ * Cursor CLI stores login tokens in auth.json on Windows/Linux
+ * (keychain/secret-service only on macOS by default).
+ * Paths mirror cli-credentials getAuthFilePath():
+ * - win32: %APPDATA%\Cursor\auth.json
+ * - linux: $XDG_CONFIG_HOME/cursor/auth.json or ~/.config/cursor/auth.json
+ * - darwin file fallback: ~/.cursor/auth.json
+ */
+async function readAuthFileToken(): Promise<string> {
+  const authPath = resolveAuthFilePath();
+  let raw: string;
+  try {
+    raw = await fs.readFile(authPath, "utf8");
+  } catch (err) {
+    const code = err && typeof err === "object" && "code" in err ? String((err as { code: unknown }).code) : "";
+    if (code === "ENOENT") {
+      throw new Error(`auth file not found at ${authPath}; run \`agent login\``);
+    }
+    throw err;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`invalid auth file at ${authPath}`);
+  }
+
+  const accessToken =
+    parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>).accessToken
+      : undefined;
+  if (typeof accessToken !== "string" || !accessToken.trim()) {
+    throw new Error(`accessToken missing in ${authPath}; run \`agent login\``);
+  }
+  return accessToken.trim();
+}
+
+function resolveAuthFilePath(): string {
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming");
+    const folder = CREDENTIAL_DOMAIN.charAt(0).toUpperCase() + CREDENTIAL_DOMAIN.slice(1).toLowerCase();
+    return path.join(appData, folder, "auth.json");
+  }
+  if (process.platform === "darwin") {
+    return path.join(os.homedir(), `.${CREDENTIAL_DOMAIN}`, "auth.json");
+  }
+  const configHome = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  return path.join(configHome, CREDENTIAL_DOMAIN, "auth.json");
 }
 
 async function readMacOsKeychainToken(): Promise<string> {
@@ -120,71 +180,6 @@ async function readLinuxSecretToken(): Promise<string> {
   const token = stdout.trim();
   if (!token) {
     throw new Error("empty secret-tool token");
-  }
-  return token;
-}
-
-async function readWindowsCredentialToken(): Promise<string> {
-  const script = `
-$ErrorActionPreference = 'Stop'
-Add-Type -TypeDefinition @"
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public class CursorCredReader {
-  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-  public struct CREDENTIAL {
-    public uint Flags;
-    public uint Type;
-    public string TargetName;
-    public string Comment;
-    public System.Runtime.InteropServices.ComTypes.FILETIME LastWritten;
-    public uint CredentialBlobSize;
-    public IntPtr CredentialBlob;
-    public uint Persist;
-    public uint AttributeCount;
-    public IntPtr Attributes;
-    public string TargetAlias;
-    public string UserName;
-  }
-  [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  public static extern bool CredRead(string target, uint type, uint reservedFlag, out IntPtr credentialPtr);
-  [DllImport("advapi32.dll", SetLastError = true)]
-  public static extern void CredFree(IntPtr cred);
-  public static string Read(string target) {
-    IntPtr ptr;
-    if (!CredRead(target, 1, 0, out ptr)) { return null; }
-    try {
-      var cred = (CREDENTIAL)Marshal.PtrToStructure(ptr, typeof(CREDENTIAL));
-      if (cred.CredentialBlob == IntPtr.Zero || cred.CredentialBlobSize == 0) { return null; }
-      return Marshal.PtrToStringUni(cred.CredentialBlob, (int)cred.CredentialBlobSize / 2);
-    } finally { CredFree(ptr); }
-  }
-}
-"@
-$targets = @(
-  '${KEYCHAIN_SERVICE}',
-  '${KEYCHAIN_SERVICE}/${KEYCHAIN_ACCOUNT}',
-  'LegacyGeneric:target=${KEYCHAIN_SERVICE}'
-)
-foreach ($target in $targets) {
-  $value = [CursorCredReader]::Read($target)
-  if (-not [string]::IsNullOrWhiteSpace($value)) {
-    Write-Output $value
-    exit 0
-  }
-}
-exit 1
-`.trim();
-
-  const { stdout } = await execFileAsync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { timeout: 8_000, maxBuffer: 1024 * 1024, windowsHide: true }
-  );
-  const token = stdout.trim();
-  if (!token) {
-    throw new Error("credential not found");
   }
   return token;
 }
