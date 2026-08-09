@@ -2213,9 +2213,7 @@
       e.preventDefault();
       if (isImageLightboxOpen()) {
         closeImageLightbox();
-        return;
       }
-      requestCancel();
       return;
     }
     if (e.key === "Enter" && !e.shiftKey) {
@@ -2321,11 +2319,6 @@
       if (openMenu) {
         e.preventDefault();
         closeMenus();
-        return;
-      }
-      if (busy) {
-        e.preventDefault();
-        requestCancel();
       }
     }
   });

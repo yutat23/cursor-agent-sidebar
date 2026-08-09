@@ -1537,7 +1537,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="task-spinner"></span>
       <span id="taskLabel">${this.uiText("エージェント実行中...", "Agent is running...")}</span>
     </span>
-    <span class="task-hint"><kbd>Esc</kbd> ${this.uiText("で停止", "to stop")}</span>
   </div>
   <footer class="composer-dock">
     <div id="modeMenu" class="picker-menu hidden" role="menu"></div>
@@ -1572,7 +1571,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         </div>
         <div class="composer-actions">
           <span id="footerSpinner" class="footer-spinner hidden"></span>
-          <button id="stopBtn" class="icon-btn stop-btn-round hidden" type="button" title="Stop (Esc)">
+          <button id="stopBtn" class="icon-btn stop-btn-round hidden" type="button" title="${this.uiText("停止", "Stop")}">
             <span class="stop-icon"></span>
           </button>
           <button id="send" class="icon-btn send-btn" type="button" title="${this.uiText("送信 (Enter)", "Send (Enter)")}">

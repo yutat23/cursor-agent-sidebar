@@ -62,7 +62,7 @@ If the `agent` command is not on your PATH, set `cursorAgent.agentPath` in VS Co
 - Use slash commands such as `/review` when they are available in your workspace.
 - Paste an image into the composer to attach it to your prompt.
 - Use the mode and model pickers at the bottom of the chat view.
-- Use **Esc** or the stop button to cancel a running request.
+- Use the stop button to cancel a running request.
 - Review permission requests before allowing tools to run.
 
 ### Auto-run permissions

@@ -66,13 +66,6 @@
         "icon": "$(debug-stop)"
       }
     ],
-    "keybindings": [
-      {
-        "command": "cursorAgent.stop",
-        "key": "escape",
-        "when": "cursorAgent.running"
-      }
-    ],
     "configuration": {
       "title": "Cursor Agent",
       "properties": {
