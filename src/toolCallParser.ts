@@ -216,13 +216,15 @@ export function parseToolUpdate(update: Record<string, unknown>): ParsedToolUpda
   const newText = diff.newText ?? (rawInput?.content as string | undefined) ?? (rawInput?.newText as string | undefined);
   const oldText = diff.oldText ?? (rawInput?.oldText as string | null | undefined);
 
+  const activityTitle = deriveActivityTitle(title, kind, rawInput, filePath);
+
   if (!filePath && !isEditLike(kind, title)) {
     return {
       toolCallId,
       kind,
       title,
       status,
-      activityTitle: title ?? kind ?? "Tool",
+      activityTitle,
     };
   }
 
@@ -232,7 +234,7 @@ export function parseToolUpdate(update: Record<string, unknown>): ParsedToolUpda
       kind,
       title,
       status,
-      activityTitle: title ?? kind ?? "Tool",
+      activityTitle,
     };
   }
 
@@ -242,7 +244,7 @@ export function parseToolUpdate(update: Record<string, unknown>): ParsedToolUpda
       kind,
       title,
       status,
-      activityTitle: title ?? path.basename(filePath),
+      activityTitle: activityTitle ?? path.basename(filePath),
     };
   }
 
@@ -268,6 +270,47 @@ export function parseToolUpdate(update: Record<string, unknown>): ParsedToolUpda
       previousText: oldText,
       nextText: newText,
     },
-    activityTitle: title ?? path.basename(filePath),
+    activityTitle: activityTitle ?? path.basename(filePath),
   };
+}
+
+function deriveActivityTitle(
+  title: string | undefined,
+  kind: string | undefined,
+  rawInput: Record<string, unknown> | undefined,
+  filePath?: string
+): string | undefined {
+  if (title?.trim()) {
+    return title.trim();
+  }
+
+  const command = asString(rawInput?.command);
+  if (command) {
+    return `\`${command}\``;
+  }
+
+  const query = asString(rawInput?.query);
+  if (query) {
+    return `Search: "${query}"`;
+  }
+
+  const pattern = asString(rawInput?.pattern) ?? asString(rawInput?.globPattern);
+  if (pattern) {
+    return kind === "search" || kind === "grep" ? `grep "${pattern}"` : pattern;
+  }
+
+  const inputPath = filePath ?? asString(rawInput?.path);
+  if (inputPath) {
+    return path.basename(inputPath);
+  }
+
+  if (kind?.trim() && kind !== "other") {
+    return kind.trim();
+  }
+
+  return undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value : undefined;
 }

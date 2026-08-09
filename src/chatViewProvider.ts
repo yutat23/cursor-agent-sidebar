@@ -769,7 +769,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({
       type: "toolActivity",
       id: parsed.toolCallId,
-      title: parsed.activityTitle ?? parsed.title ?? this.uiText("ツール", "Tool"),
+      title: parsed.activityTitle ?? parsed.title,
       status: parsed.status ?? "in_progress",
       isUpdate: update.sessionUpdate === "tool_call_update",
     });

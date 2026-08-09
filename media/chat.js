@@ -2049,7 +2049,6 @@
     const panel = ensureToolPanel();
     const list = panel.querySelector(".explored-list");
     const rowKey = msg.id || msg.title || `tool-${toolRows.size}`;
-    const title = msg.title || "Tool";
     const st = statusLabel(msg.status);
     const isRunning = st === "running";
 
@@ -2060,10 +2059,14 @@
       row.innerHTML = `<span class="dot"></span><span class="label"></span>`;
       list.appendChild(row);
       toolRows.set(rowKey, row);
+      // tool_call_update often omits title; keep a readable placeholder only for new rows.
+      row.querySelector(".label").textContent = msg.title || t("tool");
+    } else if (msg.title) {
+      // Don't overwrite a good title with a later empty/missing update.
+      row.querySelector(".label").textContent = msg.title;
     }
 
     row.className = `explored-row${isRunning ? " is-running" : " is-done"}`;
-    row.querySelector(".label").textContent = title;
     updateExploredSummary(panel);
     scrollToBottom();
   }
