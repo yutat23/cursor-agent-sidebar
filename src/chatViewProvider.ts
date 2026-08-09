@@ -8,6 +8,7 @@ import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
 import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
 import { FileEditCardData, parseToolUpdate } from "./toolCallParser";
+import { CursorUsageSnapshot, fetchCursorUsage, UsageError } from "./usageClient";
 
 type WebviewMessage =
   | { type: "send"; text: string; images?: PromptImageAttachment[] }
@@ -33,8 +34,11 @@ type WebviewMessage =
   | { type: "retryConnect" }
   | { type: "openSettings" }
   | { type: "openUsageDashboard" }
+  | { type: "requestUsage"; force?: boolean }
   | { type: "runDiagnostics" }
   | { type: "ready" };
+
+const USAGE_CACHE_TTL_MS = 60_000;
 
 interface PermissionPresentation {
   headline: string;
@@ -176,6 +180,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private connectPromise?: Promise<void>;
   private connectEpoch = 0;
   private configSubscription?: vscode.Disposable;
+  private usageCache?: CursorUsageSnapshot;
+  private usageFetchedAt = 0;
+  private usageInFlight?: Promise<void>;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -277,6 +284,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "openUsageDashboard":
           await vscode.env.openExternal(vscode.Uri.parse("https://cursor.com/dashboard/spending"));
+          break;
+        case "requestUsage":
+          await this.handleRequestUsage(!!msg.force);
           break;
         case "runDiagnostics":
           await this.handleRunDiagnostics();
@@ -1065,6 +1075,50 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       busy: this.busy,
     });
     this.post({ type: "init", status: "ready" });
+    void this.handleRequestUsage(false);
+  }
+
+  private async handleRequestUsage(force: boolean): Promise<void> {
+    const cacheAge = Date.now() - this.usageFetchedAt;
+    if (!force && this.usageCache && cacheAge < USAGE_CACHE_TTL_MS) {
+      this.post({ type: "usage", status: "ready", usage: this.usageCache });
+      return;
+    }
+
+    if (this.usageInFlight) {
+      await this.usageInFlight;
+      return;
+    }
+
+    this.post({ type: "usage", status: "loading", usage: this.usageCache });
+    this.usageInFlight = (async () => {
+      try {
+        const usage = await fetchCursorUsage();
+        this.usageCache = usage;
+        this.usageFetchedAt = Date.now();
+        this.post({ type: "usage", status: "ready", usage });
+      } catch (err) {
+        const message =
+          err instanceof UsageError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : String(err);
+        this.post({
+          type: "usage",
+          status: "error",
+          usage: this.usageCache,
+          message: this.uiText(
+            `使用量の取得に失敗しました: ${message}`,
+            `Failed to load usage: ${message}`
+          ),
+        });
+      } finally {
+        this.usageInFlight = undefined;
+      }
+    })();
+
+    await this.usageInFlight;
   }
 
   private bindClientEvents(client: AcpClient): void {
@@ -1429,7 +1483,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       <span class="pill-chevron">▾</span>
     </button>
     <div class="top-actions">
-      <button id="usageBtn" class="top-btn" type="button" title="${this.uiText("Cursor 使用量ダッシュボードを開く", "Open the Cursor usage dashboard")}">${this.uiText("使用量", "Usage")}</button>
+      <button id="usageBtn" class="top-btn" type="button" title="${this.uiText("Cursor 使用量", "Cursor usage")}">
+        <span id="usageLabel">${this.uiText("使用量", "Usage")}</span>
+        <span class="pill-chevron">▾</span>
+      </button>
       <button id="changesBtn" class="top-btn" type="button" title="${this.uiText("変更レビュー", "Change review")}">${this.uiText("変更", "Changes")}</button>
       <button id="permissionsBtn" class="top-btn" type="button" title="${this.uiText("権限ルール", "Permission rules")}">${this.uiText("権限", "Permissions")}</button>
       <button id="newChat" class="top-btn new-chat-btn" type="button" title="${this.uiText("新しいチャット", "New chat")}">
@@ -1441,6 +1498,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
   <div id="historyMenu" class="picker-menu picker-menu-wide hidden" role="menu"></div>
+  <div id="usageMenu" class="picker-menu picker-menu-wide usage-menu hidden" role="menu"></div>
   <div id="changesMenu" class="picker-menu picker-menu-wide changes-menu hidden" role="menu"></div>
   <div id="permissionsMenu" class="picker-menu picker-menu-wide permission-menu hidden" role="menu"></div>
   <div id="bootOverlay" class="boot-overlay">

@@ -48,6 +48,21 @@
     closeImage: ["閉じる", "Close"],
     openFile: ["クリックしてファイルを開く", "Click to open file"],
     historyLoadFailed: ["このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。", "The display history for this session could not be loaded. The agent state was restored, so you can continue sending messages."],
+    usage: ["使用量", "Usage"],
+    usageLoading: ["使用量を取得中...", "Loading usage..."],
+    usageUnavailable: ["使用量を取得できません", "Usage unavailable"],
+    usageIncluded: ["Included", "Included"],
+    usageAuto: ["Auto", "Auto"],
+    usageApi: ["API", "API"],
+    usageOnDemand: ["On-Demand", "On-Demand"],
+    usageUsedSuffix: ["使用", "used"],
+    usageRemaining: ["残り {0}", "{0} remaining"],
+    usageOnDemandDisabled: ["オフ", "Disabled"],
+    usageOnDemandUnlimited: ["無制限", "No monthly limit"],
+    usageResets: ["リセット {0}", "Resets {0}"],
+    usageSubtitle: ["月次プランとオンデマンド利用", "Monthly plan and on-demand usage"],
+    usageRefresh: ["更新", "Refresh"],
+    usageOpenDashboard: ["ダッシュボードを開く", "Open dashboard"],
   };
 
   function t(key, ...values) {
@@ -69,6 +84,8 @@
   const suggestMenu = document.getElementById("suggestMenu");
   const newChatBtn = document.getElementById("newChat");
   const usageBtn = document.getElementById("usageBtn");
+  const usageLabel = document.getElementById("usageLabel");
+  const usageMenu = document.getElementById("usageMenu");
   const changesBtn = document.getElementById("changesBtn");
   const changesMenu = document.getElementById("changesMenu");
   const permissionsBtn = document.getElementById("permissionsBtn");
@@ -124,6 +141,7 @@
   let permissionRules = [];
   let permissionHistory = [];
   let openMenu = null;
+  let usageState = { status: "idle", usage: null, message: "" };
   let suggestState = null;
   let suggestTimer = null;
   let suggestRequestId = 0;
@@ -309,9 +327,222 @@
     modeMenu.classList.add("hidden");
     modelMenu.classList.add("hidden");
     historyMenu.classList.add("hidden");
+    usageMenu.classList.add("hidden");
     changesMenu.classList.add("hidden");
     permissionsMenu.classList.add("hidden");
     openMenu = null;
+  }
+
+  function formatUsdFromCents(cents) {
+    const value = (Number(cents) || 0) / 100;
+    const digits = Number.isInteger(value) ? 0 : 2;
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: digits,
+      maximumFractionDigits: digits,
+    }).format(value);
+  }
+
+  /** Match Cursor CLI TUI: values in (0, 1) display as 1%. */
+  function formatUsagePercent(percent) {
+    const clamped = Math.max(0, Math.min(100, Number(percent) || 0));
+    const display = clamped > 0 && clamped < 1 ? 1 : Math.round(clamped);
+    return `${display}%`;
+  }
+
+  function formatUsageDate(iso) {
+    if (!iso) return "";
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleDateString(locale === "ja" ? "ja-JP" : "en-US", {
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  }
+
+  function onDemandView(onDemand) {
+    if (!onDemand) {
+      return null;
+    }
+    if (onDemand.kind === "fixed" && onDemand.limitCents > 0) {
+      return {
+        percent: ((onDemand.usedCents || 0) / onDemand.limitCents) * 100,
+        value: `${formatUsdFromCents(onDemand.usedCents)} / ${formatUsdFromCents(onDemand.limitCents)}`,
+        detail: t("usageRemaining", formatUsdFromCents(onDemand.remainingCents ?? 0)),
+      };
+    }
+    if (onDemand.kind === "disabled") {
+      return {
+        percent: 0,
+        value: onDemand.usedCents > 0 ? formatUsdFromCents(onDemand.usedCents) : t("usageOnDemandDisabled"),
+        detail: "",
+      };
+    }
+    return {
+      percent: undefined,
+      value: formatUsdFromCents(onDemand.usedCents || 0),
+      detail: t("usageOnDemandUnlimited"),
+    };
+  }
+
+  function applyUsageState(msg) {
+    usageState = {
+      status: msg.status || "idle",
+      usage: msg.usage || null,
+      message: msg.message || "",
+    };
+
+    const included = usageState.usage?.included;
+    if (included) {
+      const label = formatUsagePercent(included.totalPercentUsed);
+      usageLabel.textContent = label;
+      usageBtn.title = usageState.usage?.displayMessage || `${t("usageIncluded")} ${label} ${t("usageUsedSuffix")}`;
+      usageBtn.classList.toggle("usage-warn", included.totalPercentUsed >= 80);
+      usageBtn.classList.toggle("usage-critical", included.totalPercentUsed >= 95);
+    } else if (usageState.status === "loading") {
+      usageLabel.textContent = t("usage");
+      usageBtn.title = t("usageLoading");
+      usageBtn.classList.remove("usage-warn", "usage-critical");
+    } else if (usageState.status === "error") {
+      usageLabel.textContent = t("usage");
+      usageBtn.title = usageState.message || t("usageUnavailable");
+      usageBtn.classList.remove("usage-warn", "usage-critical");
+    } else {
+      usageLabel.textContent = t("usage");
+      usageBtn.title = t("usage");
+      usageBtn.classList.remove("usage-warn", "usage-critical");
+    }
+
+    if (openMenu === "usage") {
+      renderUsageMenu();
+    }
+  }
+
+  function renderUsageRow(label, value, percent, options = {}) {
+    const row = document.createElement("div");
+    row.className = `usage-row-block${options.muted ? " is-muted" : ""}`;
+    const barPercent =
+      typeof percent === "number" ? Math.max(0, Math.min(100, percent > 0 && percent < 1 ? 1 : percent)) : 0;
+    const barHtml =
+      typeof percent === "number"
+        ? `<div class="usage-meter-track"><div class="usage-meter-fill ${options.barClass || ""}" style="width:${barPercent}%"></div></div>`
+        : `<div class="usage-meter-track usage-meter-empty"></div>`;
+    row.innerHTML = `
+      <div class="usage-row">
+        <span>${escapeHtml(label)}</span>
+        <strong>${escapeHtml(value)}</strong>
+      </div>
+      ${barHtml}
+    `;
+    return row;
+  }
+
+  function renderUsageMenu() {
+    usageMenu.innerHTML = "";
+
+    const usage = usageState.usage || {};
+    const titleText = usage.planName ? `${t("usage")} · ${usage.planName}` : t("usage");
+    const title = document.createElement("div");
+    title.className = "permission-menu-title permission-menu-title-inline";
+    title.innerHTML = `<span>${escapeHtml(titleText)}</span><button class="permission-clear" type="button">${t("usageRefresh")}</button>`;
+    title.querySelector(".permission-clear").addEventListener("click", (e) => {
+      e.stopPropagation();
+      vscode.postMessage({ type: "requestUsage", force: true });
+    });
+    usageMenu.appendChild(title);
+
+    const body = document.createElement("div");
+    body.className = "usage-body";
+
+    if (usageState.status === "loading" && !usageState.usage) {
+      body.innerHTML = `<div class="picker-empty">${escapeHtml(t("usageLoading"))}</div>`;
+      usageMenu.appendChild(body);
+      return;
+    }
+
+    if (usageState.status === "error" && !usageState.usage) {
+      body.innerHTML = `<div class="picker-empty">${escapeHtml(usageState.message || t("usageUnavailable"))}</div>`;
+      usageMenu.appendChild(body);
+      appendUsageActions();
+      return;
+    }
+
+    const meta = document.createElement("div");
+    meta.className = "usage-meta";
+    const metaParts = [];
+    if (usage.billingCycleEnd) {
+      metaParts.push(t("usageResets", formatUsageDate(usage.billingCycleEnd)));
+    }
+    metaParts.push(t("usageSubtitle"));
+    meta.textContent = metaParts.join(" · ");
+    body.appendChild(meta);
+
+    if (usage.included) {
+      body.appendChild(
+        renderUsageRow(
+          t("usageIncluded"),
+          `${formatUsagePercent(usage.included.totalPercentUsed)} ${t("usageUsedSuffix")}`,
+          usage.included.totalPercentUsed,
+          { barClass: "usage-fill-included" }
+        )
+      );
+      body.appendChild(
+        renderUsageRow(
+          t("usageAuto"),
+          `${formatUsagePercent(usage.included.autoPercentUsed)} ${t("usageUsedSuffix")}`,
+          usage.included.autoPercentUsed,
+          { muted: true, barClass: "usage-fill-auto" }
+        )
+      );
+      body.appendChild(
+        renderUsageRow(
+          t("usageApi"),
+          `${formatUsagePercent(usage.included.apiPercentUsed)} ${t("usageUsedSuffix")}`,
+          usage.included.apiPercentUsed,
+          { muted: true, barClass: "usage-fill-api" }
+        )
+      );
+    }
+
+    const onDemand = onDemandView(usage.onDemand);
+    if (onDemand) {
+      const block = renderUsageRow(t("usageOnDemand"), onDemand.value, onDemand.percent, {
+        barClass: "usage-fill-ondemand",
+      });
+      if (onDemand.detail) {
+        const detail = document.createElement("div");
+        detail.className = "usage-period";
+        detail.textContent = onDemand.detail;
+        block.appendChild(detail);
+      }
+      body.appendChild(block);
+    }
+
+    if (usageState.status === "error" && usageState.message) {
+      const err = document.createElement("div");
+      err.className = "usage-error";
+      err.textContent = usageState.message;
+      body.appendChild(err);
+    }
+
+    usageMenu.appendChild(body);
+    appendUsageActions();
+  }
+
+  function appendUsageActions() {
+    const actions = document.createElement("div");
+    actions.className = "usage-actions";
+    const openBtn = document.createElement("button");
+    openBtn.type = "button";
+    openBtn.className = "usage-action-btn";
+    openBtn.textContent = t("usageOpenDashboard");
+    openBtn.addEventListener("click", () => {
+      vscode.postMessage({ type: "openUsageDashboard" });
+    });
+    actions.appendChild(openBtn);
+    usageMenu.appendChild(actions);
   }
 
   function closeSuggestMenu() {
@@ -907,7 +1138,8 @@
   }
 
   function toggleMenu(menuName) {
-    if (!sessionReady || busy) return;
+    if (!sessionReady) return;
+    if (busy && menuName !== "usage") return;
     if (openMenu === menuName) {
       closeMenus();
       return;
@@ -929,6 +1161,11 @@
       renderHistoryMenu();
       historyMenu.classList.remove("hidden");
       positionMenu(historyMenu, historyBtn, "below");
+    } else if (menuName === "usage") {
+      vscode.postMessage({ type: "requestUsage", force: false });
+      renderUsageMenu();
+      usageMenu.classList.remove("hidden");
+      positionMenu(usageMenu, usageBtn, "below");
     } else if (menuName === "changes") {
       vscode.postMessage({ type: "requestChangeReview" });
       renderChangesMenu();
@@ -1890,7 +2127,7 @@
 
   usageBtn.addEventListener("click", (e) => {
     e.stopPropagation();
-    vscode.postMessage({ type: "openUsageDashboard" });
+    toggleMenu("usage");
   });
 
   changesBtn.addEventListener("click", (e) => {
@@ -2151,6 +2388,10 @@
         if (typeof msg.autoApprovePermissions === "boolean") {
           applyAutoRun(msg.autoApprovePermissions);
         }
+        break;
+
+      case "usage":
+        applyUsageState(msg);
         break;
 
       case "permissionState":
