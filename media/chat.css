@@ -414,6 +414,19 @@ kbd {
   margin: 2px 0;
 }
 
+.assistant-text .md-list .md-list {
+  margin: 4px 0 2px;
+}
+
+.assistant-text .md-list-text {
+  display: block;
+}
+
+.assistant-text .md-list-text + .md-list,
+.assistant-text .md-list-text + .md-list-text {
+  margin-top: 4px;
+}
+
 .assistant-text .md-list li::marker {
   color: var(--vscode-descriptionForeground);
 }

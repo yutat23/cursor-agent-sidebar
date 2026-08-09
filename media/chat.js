@@ -1439,6 +1439,150 @@
       .map((cell) => cell.trim());
   }
 
+  function matchMarkdownListItem(line) {
+    if (!line) {
+      return null;
+    }
+    const unordered = line.match(/^(\s*)([-*+])\s+(.*)$/);
+    if (unordered) {
+      return {
+        indent: unordered[1].length,
+        ordered: false,
+        start: undefined,
+        text: unordered[3],
+      };
+    }
+    const ordered = line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+    if (ordered) {
+      return {
+        indent: ordered[1].length,
+        ordered: true,
+        start: Number(ordered[2]),
+        text: ordered[3],
+      };
+    }
+    return null;
+  }
+
+  function peekNextNonEmpty(lines, index) {
+    let i = index;
+    while (i < lines.length && !lines[i].trim()) {
+      i += 1;
+    }
+    return i < lines.length ? { index: i, line: lines[i] } : null;
+  }
+
+  function renderListItemParts(parts) {
+    return parts
+      .map((part) => {
+        if (part && typeof part === "object" && part.nestedHtml) {
+          return part.nestedHtml;
+        }
+        return `<div class="md-list-text">${renderInlineMarkdown(String(part))}</div>`;
+      })
+      .join("");
+  }
+
+  function parseMarkdownList(lines, startIndex, baseIndent = null) {
+    const first = matchMarkdownListItem(lines[startIndex]);
+    if (!first) {
+      return { html: "", endIndex: startIndex };
+    }
+
+    const indent = baseIndent ?? first.indent;
+    const ordered = first.ordered;
+    const items = [];
+    let i = startIndex;
+    let startNum = ordered ? first.start : undefined;
+
+    while (i < lines.length) {
+      if (!lines[i].trim()) {
+        const next = peekNextNonEmpty(lines, i + 1);
+        if (!next) {
+          break;
+        }
+        const nextItem = matchMarkdownListItem(next.line);
+        if (nextItem && nextItem.indent >= indent && nextItem.ordered === ordered) {
+          i = next.index;
+          continue;
+        }
+        if (nextItem && nextItem.indent > indent) {
+          i = next.index;
+          continue;
+        }
+        break;
+      }
+
+      const item = matchMarkdownListItem(lines[i]);
+      if (!item || item.indent < indent || item.ordered !== ordered || item.indent > indent) {
+        break;
+      }
+
+      if (ordered && items.length === 0 && Number.isFinite(item.start)) {
+        startNum = item.start;
+      }
+
+      const parts = [item.text];
+      i += 1;
+
+      while (i < lines.length) {
+        if (!lines[i].trim()) {
+          const next = peekNextNonEmpty(lines, i + 1);
+          if (!next) {
+            break;
+          }
+          const nextItem = matchMarkdownListItem(next.line);
+          if (nextItem && nextItem.indent === indent && nextItem.ordered === ordered) {
+            break;
+          }
+          if (nextItem && nextItem.indent > indent) {
+            i = next.index;
+            continue;
+          }
+          const nextIndent = next.line.match(/^(\s*)/)?.[1].length ?? 0;
+          if (!nextItem && nextIndent > indent) {
+            i = next.index;
+            continue;
+          }
+          break;
+        }
+
+        const nested = matchMarkdownListItem(lines[i]);
+        if (nested && nested.indent > indent) {
+          const nestedList = parseMarkdownList(lines, i, nested.indent);
+          parts.push({ nestedHtml: nestedList.html });
+          i = nestedList.endIndex;
+          continue;
+        }
+        if (nested && nested.indent === indent) {
+          break;
+        }
+        if (nested && nested.indent < indent) {
+          break;
+        }
+
+        const leading = lines[i].match(/^\s*/)[0].length;
+        if (leading > indent) {
+          parts.push(lines[i].trim());
+          i += 1;
+          continue;
+        }
+        break;
+      }
+
+      items.push(parts);
+    }
+
+    const tag = ordered ? "ol" : "ul";
+    const startAttr =
+      ordered && Number.isFinite(startNum) && startNum > 1 ? ` start="${startNum}"` : "";
+    const html = `<${tag} class="md-list"${startAttr}>${items
+      .map((parts) => `<li>${renderListItemParts(parts)}</li>`)
+      .join("")}</${tag}>`;
+
+    return { html, endIndex: i };
+  }
+
   function isBlockStart(lines, index) {
     const line = lines[index];
     if (!line?.trim()) {
@@ -1453,10 +1597,7 @@
     if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
       return true;
     }
-    if (/^\s*[-*+]\s+/.test(line)) {
-      return true;
-    }
-    if (/^\s*\d+\.\s+/.test(line)) {
+    if (matchMarkdownListItem(line)) {
       return true;
     }
     if (/^\s*>\s?/.test(line)) {
@@ -1536,27 +1677,10 @@
         continue;
       }
 
-      if (/^\s*[-*+]\s+/.test(line)) {
-        const items = [];
-        while (i < lines.length && /^\s*[-*+]\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*[-*+]\s+/, ""));
-          i += 1;
-        }
-        out.push(
-          `<ul class="md-list">${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ul>`
-        );
-        continue;
-      }
-
-      if (/^\s*\d+\.\s+/.test(line)) {
-        const items = [];
-        while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*\d+\.\s+/, ""));
-          i += 1;
-        }
-        out.push(
-          `<ol class="md-list">${items.map((item) => `<li>${renderInlineMarkdown(item)}</li>`).join("")}</ol>`
-        );
+      if (matchMarkdownListItem(line)) {
+        const list = parseMarkdownList(lines, i);
+        out.push(list.html);
+        i = list.endIndex;
         continue;
       }
 
