@@ -2,7 +2,7 @@
   "name": "cursor-agent-sidebar",
   "displayName": "Cursor Agent Sidebar",
   "description": "Chat with the Cursor CLI Agent from the VS Code secondary sidebar using ACP.",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "publisher": "yutat23",
   "icon": "media/marketplace-icon.png",
   "license": "MIT",
