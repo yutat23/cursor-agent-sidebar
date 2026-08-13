@@ -130,6 +130,7 @@
   let responsePanel = null;
   let thinkingStart = 0;
   let pendingMarkdownRender = 0;
+  let pendingThinkingRender = 0;
 
   const MODE_ICONS = { agent: "∞", plan: "☰", ask: "?" };
 
@@ -1645,124 +1646,313 @@
     return false;
   }
 
-  function renderMarkdown(text) {
+  function renderCodeBlockHtml(language, code, highlight) {
+    const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
+    const codeHtml = highlight ? highlightCode(code, language) : escapeHtml(code);
+    return (
+      `<div class="code-wrap"><pre class="code-block"${langAttr}><code>${codeHtml}</code></pre>` +
+      `<button class="copy-btn code-copy" type="button" title="${t("copy")}">${COPY_ICON}</button></div>`
+    );
+  }
+
+  function consumeMarkdownBlock(lines, start, { highlight = true, maxHighlightChars = Infinity } = {}) {
+    let i = start;
+    while (i < lines.length && !lines[i].trim()) {
+      i += 1;
+    }
+    if (i !== start) {
+      return { html: "", endIndex: i, complete: true, kind: "ws" };
+    }
+    if (i >= lines.length) {
+      return { html: "", endIndex: i, complete: true, kind: "ws" };
+    }
+
+    const line = lines[i];
+
+    if (line.trim().startsWith("```")) {
+      const fence = line.trim().match(/^```(\S*)/);
+      const language = normalizeCodeLanguage(fence?.[1] || "");
+      const contentStart = i + 1;
+      i += 1;
+      while (i < lines.length && !lines[i].trim().startsWith("```")) {
+        i += 1;
+      }
+      if (i >= lines.length) {
+        return { html: "", endIndex: start, complete: false, kind: "fence", language };
+      }
+      const code = lines.slice(contentStart, i).join("\n");
+      i += 1;
+      return {
+        html: renderCodeBlockHtml(language, code, highlight && code.length <= maxHighlightChars),
+        endIndex: i,
+        complete: true,
+        kind: "code",
+      };
+    }
+
+    if (line.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
+      const headerCells = parseTableRow(line);
+      i += 2;
+      const bodyRows = [];
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim() && !isTableSeparator(lines[i])) {
+        bodyRows.push(parseTableRow(lines[i]));
+        i += 1;
+      }
+
+      let table = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
+      for (const cell of headerCells) {
+        table += `<th>${renderInlineMarkdown(cell)}</th>`;
+      }
+      table += "</tr></thead><tbody>";
+      for (const row of bodyRows) {
+        table += "<tr>";
+        for (let c = 0; c < headerCells.length; c += 1) {
+          table += `<td>${renderInlineMarkdown(row[c] || "")}</td>`;
+        }
+        table += "</tr>";
+      }
+      table += "</tbody></table></div>";
+      return { html: table, endIndex: i, complete: i < lines.length, kind: "table" };
+    }
+
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      i += 1;
+      return {
+        html: `<h${level} class="md-heading md-h${level}">${renderInlineMarkdown(headingMatch[2])}</h${level}>`,
+        endIndex: i,
+        complete: i < lines.length,
+        kind: "heading",
+      };
+    }
+
+    if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
+      i += 1;
+      return { html: '<hr class="md-hr">', endIndex: i, complete: i < lines.length, kind: "hr" };
+    }
+
+    if (matchMarkdownListItem(line)) {
+      const list = parseMarkdownList(lines, i);
+      return {
+        html: list.html,
+        endIndex: list.endIndex,
+        complete: list.endIndex < lines.length,
+        kind: "list",
+      };
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        items.push(lines[i].replace(/^\s*>\s?/, ""));
+        i += 1;
+      }
+      return {
+        html: `<blockquote class="md-quote">${renderInlineMarkdown(items.join(" "))}</blockquote>`,
+        endIndex: i,
+        complete: i < lines.length,
+        kind: "quote",
+      };
+    }
+
+    const paraLines = [];
+    while (i < lines.length && lines[i].trim() && !isBlockStart(lines, i)) {
+      paraLines.push(lines[i]);
+      i += 1;
+    }
+    if (!paraLines.length) {
+      return { html: "", endIndex: Math.min(start + 1, lines.length), complete: true, kind: "ws" };
+    }
+    return {
+      html: `<p class="md-paragraph">${renderInlineMarkdown(paraLines.join(" "))}</p>`,
+      endIndex: i,
+      complete: i < lines.length,
+      kind: "paragraph",
+    };
+  }
+
+  function renderMarkdown(text, { highlight = true } = {}) {
     const lines = text.replace(/\r\n/g, "\n").split("\n");
     const out = [];
     let i = 0;
 
     while (i < lines.length) {
-      const line = lines[i];
-
-      if (line.trim().startsWith("```")) {
-        const fence = line.trim().match(/^```(\S*)/);
-        const language = normalizeCodeLanguage(fence?.[1] || "");
-        const chunks = [];
-        i += 1;
-        while (i < lines.length && !lines[i].trim().startsWith("```")) {
-          chunks.push(lines[i]);
-          i += 1;
-        }
-        const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
-        out.push(
-          `<div class="code-wrap"><pre class="code-block"${langAttr}><code>${highlightCode(chunks.join("\n"), language)}</code></pre>` +
-            `<button class="copy-btn code-copy" type="button" title="${t("copy")}">${COPY_ICON}</button></div>`
-        );
-        i += 1;
-        continue;
+      const block = consumeMarkdownBlock(lines, i, { highlight });
+      if (!block.complete && block.kind === "fence") {
+        out.push(renderCodeBlockHtml(block.language, lines.slice(i + 1).join("\n"), highlight));
+        break;
       }
-
-      if (line.includes("|") && i + 1 < lines.length && isTableSeparator(lines[i + 1])) {
-        const headerCells = parseTableRow(line);
-        i += 2;
-        const bodyRows = [];
-        while (i < lines.length && lines[i].includes("|") && lines[i].trim() && !isTableSeparator(lines[i])) {
-          bodyRows.push(parseTableRow(lines[i]));
-          i += 1;
-        }
-
-        let table = '<div class="md-table-wrap"><table class="md-table"><thead><tr>';
-        for (const cell of headerCells) {
-          table += `<th>${renderInlineMarkdown(cell)}</th>`;
-        }
-        table += "</tr></thead><tbody>";
-        for (const row of bodyRows) {
-          table += "<tr>";
-          for (let c = 0; c < headerCells.length; c += 1) {
-            table += `<td>${renderInlineMarkdown(row[c] || "")}</td>`;
-          }
-          table += "</tr>";
-        }
-        table += "</tbody></table></div>";
-        out.push(table);
-        continue;
+      if (block.html) {
+        out.push(block.html);
       }
-
-      const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
-      if (headingMatch) {
-        const level = headingMatch[1].length;
-        out.push(
-          `<h${level} class="md-heading md-h${level}">${renderInlineMarkdown(headingMatch[2])}</h${level}>`
-        );
-        i += 1;
-        continue;
+      if (block.endIndex <= i) {
+        break;
       }
-
-      if (/^(\-{3,}|\*{3,}|_{3,})\s*$/.test(line.trim())) {
-        out.push('<hr class="md-hr">');
-        i += 1;
-        continue;
-      }
-
-      if (matchMarkdownListItem(line)) {
-        const list = parseMarkdownList(lines, i);
-        out.push(list.html);
-        i = list.endIndex;
-        continue;
-      }
-
-      if (/^\s*>\s?/.test(line)) {
-        const items = [];
-        while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
-          items.push(lines[i].replace(/^\s*>\s?/, ""));
-          i += 1;
-        }
-        out.push(`<blockquote class="md-quote">${renderInlineMarkdown(items.join(" "))}</blockquote>`);
-        continue;
-      }
-
-      if (!line.trim()) {
-        i += 1;
-        continue;
-      }
-
-      const paraLines = [];
-      while (i < lines.length && lines[i].trim() && !isBlockStart(lines, i)) {
-        paraLines.push(lines[i]);
-        i += 1;
-      }
-      if (paraLines.length) {
-        out.push(`<p class="md-paragraph">${renderInlineMarkdown(paraLines.join(" "))}</p>`);
-      }
+      i = block.endIndex;
     }
 
     return out.join("");
   }
 
-  function cancelPendingMarkdownRender() {
+  function cancelPendingStreamRenders() {
     if (pendingMarkdownRender) {
       cancelAnimationFrame(pendingMarkdownRender);
       pendingMarkdownRender = 0;
     }
+    if (pendingThinkingRender) {
+      cancelAnimationFrame(pendingThinkingRender);
+      pendingThinkingRender = 0;
+    }
   }
 
-  function renderAssistantContent(el, { withCopy = true } = {}) {
+  function offsetAfterLine(text, lines, lineCount) {
+    if (lineCount <= 0) {
+      return 0;
+    }
+    if (lineCount >= lines.length) {
+      return text.length;
+    }
+    let off = 0;
+    for (let i = 0; i < lineCount; i++) {
+      off += lines[i].length;
+      if (off < text.length && text.charCodeAt(off) === 10) {
+        off += 1;
+      }
+    }
+    return off;
+  }
+
+  function clearStreamState(el) {
+    el.__stable = null;
+    el.__tail = null;
+    el.__line = 0;
+    el.__codeNode = null;
+    el.__codeShown = 0;
+    el.classList.remove("is-streaming");
+  }
+
+  function ensureStreamStructure(el) {
+    if (el.__stable && el.__tail && el.__stable.parentNode === el && el.__tail.parentNode === el) {
+      return;
+    }
+
+    el.textContent = "";
+    el.__codeNode = null;
+    el.__codeShown = 0;
+    el.__stable = document.createElement("div");
+    el.__stable.className = "md-stable";
+    el.__tail = document.createElement("div");
+    el.__tail.className = "md-tail";
+    el.appendChild(el.__stable);
+    el.appendChild(el.__tail);
+    el.__line = 0;
+    el.classList.add("is-streaming");
+    el.classList.remove("rendered");
+  }
+
+  function renderFenceTail(el, language, sourceText, codeOffset) {
+    const tail = el.__tail;
+    tail.className = "md-tail is-code";
+    const codeStart = Math.min(codeOffset, sourceText.length);
+
+    if (!el.__codeNode || el.__codeNode.parentNode?.closest(".md-tail") !== tail) {
+      const langAttr = language ? ` data-lang="${escapeHtml(language)}"` : "";
+      tail.innerHTML = `<div class="code-wrap is-live"><pre class="code-block"${langAttr}><code></code></pre></div>`;
+      el.__codeNode = tail.querySelector("code");
+      const initial = sourceText.slice(codeStart);
+      el.__codeNode.appendChild(document.createTextNode(initial));
+      el.__codeShown = initial.length;
+      return;
+    }
+
+    if (language) {
+      const pre = el.__codeNode.closest(".code-block");
+      if (pre && pre.getAttribute("data-lang") !== language) {
+        pre.setAttribute("data-lang", language);
+      }
+    }
+
+    const node = el.__codeNode.firstChild;
+    const nextLen = sourceText.length - codeStart;
+    if (node && node.nodeType === Node.TEXT_NODE) {
+      if (nextLen >= el.__codeShown) {
+        node.appendData(sourceText.slice(codeStart + el.__codeShown));
+      } else {
+        node.data = sourceText.slice(codeStart);
+      }
+      el.__codeShown = nextLen;
+    } else {
+      el.__codeNode.textContent = sourceText.slice(codeStart);
+      el.__codeShown = nextLen;
+    }
+  }
+
+  function renderStreamingMarkdown(el, text) {
+    el.__raw = text;
+    ensureStreamStructure(el);
+
+    const lines = text.replace(/\r\n/g, "\n").split("\n");
+    let i = el.__line || 0;
+    const committed = [];
+    let pending = null;
+
+    while (i < lines.length) {
+      const block = consumeMarkdownBlock(lines, i, { highlight: true, maxHighlightChars: 12000 });
+      if (!block.complete) {
+        pending = block;
+        break;
+      }
+      committed.push(block);
+      if (block.endIndex <= i) {
+        break;
+      }
+      i = block.endIndex;
+    }
+
+    if (committed.length) {
+      const html = committed.map((block) => block.html).join("");
+      if (html) {
+        el.__stable.insertAdjacentHTML("beforeend", html);
+      }
+      el.__line = committed[committed.length - 1].endIndex;
+      el.__codeNode = null;
+      el.__codeShown = 0;
+    }
+
+    if (pending?.kind === "fence") {
+      const openLine = el.__line || 0;
+      const open = lines[openLine] || "";
+      const language = normalizeCodeLanguage(open.trim().match(/^```(\S*)/)?.[1] || "");
+      renderFenceTail(el, language, text, offsetAfterLine(text, lines, openLine + 1));
+    } else if (pending?.html) {
+      el.__codeNode = null;
+      el.__codeShown = 0;
+      const restOffset = offsetAfterLine(text, lines, el.__line || 0);
+      if (text.length - restOffset > 8000) {
+        el.__tail.className = "md-tail";
+        el.__tail.textContent = text.slice(restOffset);
+      } else {
+        el.__tail.className = "md-tail is-rich";
+        el.__tail.innerHTML = pending.html;
+      }
+    } else {
+      el.__codeNode = null;
+      el.__codeShown = 0;
+      el.__tail.className = "md-tail";
+      el.__tail.textContent = "";
+    }
+  }
+
+  function renderAssistantContent(el, { withCopy = true, highlight = true } = {}) {
     const text = el.__raw ?? el.textContent ?? "";
     if (!text.trim()) {
       return;
     }
 
     el.__raw = text;
-    el.innerHTML = renderMarkdown(text);
+    clearStreamState(el);
+    el.innerHTML = renderMarkdown(text, { highlight });
     if (withCopy) {
       attachMessageCopy(el, text);
     }
@@ -1775,8 +1965,8 @@
     }
 
     if (final) {
-      cancelPendingMarkdownRender();
-      renderAssistantContent(el, { withCopy: true });
+      cancelPendingStreamRenders();
+      renderAssistantContent(el, { withCopy: true, highlight: true });
       scrollToBottom();
       return;
     }
@@ -1787,7 +1977,29 @@
 
     pendingMarkdownRender = requestAnimationFrame(() => {
       pendingMarkdownRender = 0;
-      renderAssistantContent(el, { withCopy: false });
+      renderStreamingMarkdown(el, el.__raw ?? "");
+      scrollToBottom();
+    });
+  }
+
+  function scheduleThinkingRender() {
+    if (!currentThinkingEl || pendingThinkingRender) {
+      return;
+    }
+
+    pendingThinkingRender = requestAnimationFrame(() => {
+      pendingThinkingRender = 0;
+      if (!currentThinkingEl) {
+        return;
+      }
+      const body = currentThinkingEl.querySelector(".thought-body");
+      if (body) {
+        body.textContent = currentThinkingEl.__raw || "";
+      }
+      const label = currentThinkingEl.querySelector(".thought-label");
+      if (label) {
+        label.textContent = formatThoughtDuration(Date.now() - thinkingStart);
+      }
       scrollToBottom();
     });
   }
@@ -2113,6 +2325,16 @@
   }
 
   function settleThoughtBlocks() {
+    if (pendingThinkingRender) {
+      cancelAnimationFrame(pendingThinkingRender);
+      pendingThinkingRender = 0;
+    }
+    if (currentThinkingEl) {
+      const body = currentThinkingEl.querySelector(".thought-body");
+      if (body) {
+        body.textContent = currentThinkingEl.__raw || "";
+      }
+    }
     document.querySelectorAll(".thought-block.is-live").forEach((block) => {
       block.classList.remove("is-live");
     });
@@ -2182,7 +2404,7 @@
   }
 
   function resetTurnState() {
-    cancelPendingMarkdownRender();
+    cancelPendingStreamRenders();
     currentTurn = null;
     currentAssistantEl = null;
     currentThinkingEl = null;
@@ -2446,6 +2668,7 @@
             thinkingStart = Date.now();
             const block = document.createElement("div");
             block.className = "thought-block collapsed is-live";
+            block.__raw = "";
             block.innerHTML = `
               <button class="thought-toggle" type="button">
                 <span class="chevron">▾</span>
@@ -2459,11 +2682,9 @@
             ensureActivityPanel().appendChild(block);
             currentThinkingEl = block;
           }
-          currentThinkingEl.querySelector(".thought-body").textContent += msg.text;
-          currentThinkingEl.querySelector(".thought-label").textContent =
-            formatThoughtDuration(Date.now() - thinkingStart);
+          currentThinkingEl.__raw = (currentThinkingEl.__raw || "") + (msg.text || "");
+          scheduleThinkingRender();
         }
-        scrollToBottom();
         break;
 
       case "toolActivity":

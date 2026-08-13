@@ -383,6 +383,19 @@ kbd {
   white-space: pre-wrap;
 }
 
+.assistant-text.is-streaming {
+  white-space: normal;
+}
+
+.assistant-text.is-streaming .md-stable > :first-child,
+.assistant-text.is-streaming .md-tail > :first-child {
+  margin-top: 0;
+}
+
+.assistant-text.is-streaming .md-tail:not(.is-rich):not(.is-code) {
+  white-space: pre-wrap;
+}
+
 .assistant-text.typing::after {
   content: "▍";
   animation: blink 1s step-end infinite;

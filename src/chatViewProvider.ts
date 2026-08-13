@@ -1451,10 +1451,26 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private flushReplayBuffer(): void {
+    const coalesced: Record<string, unknown>[] = [];
     for (const message of this.replayBuffer) {
+      const last = coalesced[coalesced.length - 1];
+      if (
+        last &&
+        message.type === last.type &&
+        (message.type === "assistantChunk" || message.type === "thinking") &&
+        typeof last.text === "string" &&
+        typeof message.text === "string"
+      ) {
+        last.text += message.text;
+        continue;
+      }
+      coalesced.push({ ...message });
+    }
+
+    this.replayBuffer = [];
+    for (const message of coalesced) {
       void this.view?.webview.postMessage(message);
     }
-    this.replayBuffer = [];
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -1516,7 +1532,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>
   </div>
   <div class="thread-wrap">
-    <main id="thread" class="thread" aria-live="polite"></main>
+    <main id="thread" class="thread"></main>
     <div id="emptyState" class="empty-state">
       <div class="empty-title">Cursor Agent</div>
       <div class="empty-sub">${this.uiText("コードについて質問したり、編集やタスクを依頼できます", "Ask about your code, request edits, or assign tasks")}</div>
