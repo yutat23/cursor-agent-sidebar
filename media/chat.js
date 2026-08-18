@@ -6,6 +6,13 @@
     taskRunning: ["エージェント実行中...", "Agent is running..."],
     followupPlaceholder: ["フォローアップを入力...", "Enter a follow-up..."],
     promptPlaceholder: ["質問や指示を入力（@ でコンテキスト追加）", "Ask a question or enter an instruction (@ for context)"],
+    sendTitle: ["送信 (Enter)", "Send (Enter)"],
+    queueTitle: ["キューに追加 (Enter)", "Add to queue (Enter)"],
+    queued: ["キュー", "Queued"],
+    interruptQueued: ["次に送信", "Next"],
+    removeQueued: ["キューから削除", "Remove from queue"],
+    sendQueued: ["今すぐ送る", "Send now"],
+    queuedImage: ["画像 {0} 枚", "{0} image(s)"],
     autoRunOn: ["自動実行 ON — ツールは確認なしで実行されます（--yolo）", "Auto-run ON — tools run without confirmation (--yolo)"],
     autoRunOff: ["自動実行 OFF — クリックで ON（--yolo 相当）", "Auto-run OFF — click to enable (--yolo equivalent)"],
     connecting: ["エージェントに接続中...", "Connecting to the agent..."],
@@ -106,6 +113,7 @@
   const jumpBottom = document.getElementById("jumpBottom");
   const contextTray = document.getElementById("contextTray");
   const attachmentTray = document.getElementById("attachmentTray");
+  const queueTray = document.getElementById("queueTray");
   const imageLightbox = document.getElementById("imageLightbox");
   const imageLightboxImg = document.getElementById("imageLightboxImg");
   const imageLightboxClose = document.getElementById("imageLightboxClose");
@@ -116,6 +124,7 @@
 
   let pendingAttachments = [];
   let attachmentIdCounter = 0;
+  let queuedPrompts = [];
 
   let busy = false;
   let stopping = false;
@@ -160,18 +169,22 @@
     busy = running;
     stopping = !!isStopping;
 
-    sendBtn.classList.toggle("hidden", running);
+    sendBtn.classList.remove("hidden");
     stopBtn.classList.toggle("hidden", !running);
     footerSpinner.classList.toggle("hidden", !running || isStopping);
     taskStatus.classList.toggle("hidden", !running);
 
     taskLabel.textContent = isStopping ? t("taskStopping") : t("taskRunning");
-    inputEl.disabled = running;
     inputEl.placeholder = running
       ? t("followupPlaceholder")
       : t("promptPlaceholder");
+    sendBtn.title = running ? t("queueTitle") : t("sendTitle");
 
     updateInteractiveState();
+
+    if (queuedPrompts.length) {
+      renderQueueTray(queuedPrompts);
+    }
 
     if (running) {
       inputEl.focus();
@@ -179,13 +192,13 @@
   }
 
   function updateInteractiveState() {
-    const blocked = !sessionReady || busy;
-    modePill.disabled = blocked;
-    modelPill.disabled = blocked;
-    historyBtn.disabled = blocked;
+    const pickerBlocked = !sessionReady || busy;
+    modePill.disabled = pickerBlocked;
+    modelPill.disabled = pickerBlocked;
+    historyBtn.disabled = pickerBlocked;
     autoRunPill.disabled = !sessionReady;
-    inputEl.disabled = blocked;
-    sendBtn.disabled = blocked;
+    inputEl.disabled = !sessionReady;
+    sendBtn.disabled = !sessionReady;
   }
 
   function applyAutoRun(enabled) {
@@ -266,7 +279,7 @@
     const text = inputEl.value;
     contextPreviewText = text;
 
-    if (!sessionReady || busy || !hasContextReference(text)) {
+    if (!sessionReady || !hasContextReference(text)) {
       renderContextPreview([]);
       return;
     }
@@ -692,7 +705,7 @@
   }
 
   function queueSuggestions(token) {
-    if (!sessionReady || busy) {
+    if (!sessionReady) {
       closeSuggestMenu();
       return;
     }
@@ -2417,17 +2430,69 @@
     thinkingStart = 0;
   }
 
-  function sendMessage() {
-    const text = inputEl.value.trim();
-    if ((!text && pendingAttachments.length === 0) || busy) {
+  function renderQueueTray(items) {
+    queuedPrompts = Array.isArray(items) ? items : [];
+    if (!queueTray) {
       return;
     }
-    closeSuggestMenu();
-    vscode.postMessage({ type: "send", text, images: getAttachmentsForSend() });
+
+    queueTray.innerHTML = "";
+    if (queuedPrompts.length === 0) {
+      queueTray.classList.add("hidden");
+      return;
+    }
+
+    queueTray.classList.remove("hidden");
+    for (const item of queuedPrompts) {
+      const chip = document.createElement("div");
+      chip.className = `queue-chip${item.kind === "interrupt" ? " is-interrupt" : ""}`;
+      const preview = (item.text || "").trim().replace(/\s+/g, " ");
+      const imageNote = item.imageCount > 0 ? t("queuedImage", item.imageCount) : "";
+      const label = preview || imageNote || t("queued");
+      chip.innerHTML = `
+        <span class="queue-kind">${escapeHtml(item.kind === "interrupt" ? t("interruptQueued") : t("queued"))}</span>
+        <span class="queue-label" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+        <button class="queue-send" type="button">${escapeHtml(t("sendQueued"))}</button>
+        <button class="queue-remove" type="button" aria-label="${escapeHtml(t("removeQueued"))}">×</button>
+      `;
+      chip.querySelector(".queue-send").addEventListener("click", () => {
+        vscode.postMessage({ type: "sendQueuedPrompt", id: item.id });
+      });
+      chip.querySelector(".queue-remove").addEventListener("click", () => {
+        vscode.postMessage({ type: "removeQueuedPrompt", id: item.id });
+      });
+      queueTray.appendChild(chip);
+    }
+  }
+
+  function clearComposer() {
     inputEl.value = "";
     renderContextPreview([]);
     clearAttachments();
     inputEl.style.height = "auto";
+  }
+
+  function submitComposer() {
+    if (!sessionReady) {
+      return;
+    }
+
+    const text = inputEl.value.trim();
+    if (!text && pendingAttachments.length === 0) {
+      return;
+    }
+
+    closeSuggestMenu();
+    vscode.postMessage({
+      type: "send",
+      text,
+      images: getAttachmentsForSend(),
+    });
+    clearComposer();
+  }
+
+  function sendMessage() {
+    submitComposer();
   }
 
   sendBtn.addEventListener("click", sendMessage);
@@ -2509,7 +2574,7 @@
     }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      sendMessage();
+      submitComposer();
     }
   });
 
@@ -2635,6 +2700,7 @@
         resetTurnState();
         clearAttachments();
         renderContextPreview([]);
+        renderQueueTray([]);
         setRunning(false, false);
         dismissPermissionCards();
         stickToBottom = true;
@@ -2643,6 +2709,10 @@
 
       case "userMessage":
         appendUserMessage(msg.text || "", msg.images);
+        break;
+
+      case "promptQueue":
+        renderQueueTray(msg.items || []);
         break;
 
       case "assistantStart":

@@ -12,6 +12,8 @@ import { CursorUsageSnapshot, fetchCursorUsage, UsageError } from "./usageClient
 
 type WebviewMessage =
   | { type: "send"; text: string; images?: PromptImageAttachment[] }
+  | { type: "removeQueuedPrompt"; id: string }
+  | { type: "sendQueuedPrompt"; id: string }
   | { type: "requestSuggestions"; kind: "file" | "slash"; query: string }
   | { type: "requestContextPreview"; text: string }
   | { type: "newChat" }
@@ -80,6 +82,13 @@ interface ChangeReviewItem {
   previousText?: string | null;
   canRevert: boolean;
   updatedAt: string;
+}
+
+interface QueuedPrompt {
+  id: string;
+  text: string;
+  images: PromptImageAttachment[];
+  kind: "queue" | "interrupt";
 }
 
 const MODE_ICONS: Record<AgentMode, string> = {
@@ -166,6 +175,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private client?: AcpClient;
   private busy = false;
   private stopping = false;
+  private drainAfterCancel = false;
+  private promptGeneration = 0;
+  private queueSeq = 0;
+  private promptQueue: QueuedPrompt[] = [];
   private mode: AgentMode = "agent";
   private modelId = "default";
   private sessionConfig?: SessionPickerConfig;
@@ -214,9 +227,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       switch (msg.type) {
         case "ready":
           await this.ensureClient();
+          this.postQueue();
           break;
         case "send":
           await this.handleSend(msg.text, msg.images);
+          break;
+        case "removeQueuedPrompt":
+          this.removeQueuedPrompt(msg.id);
+          break;
+        case "sendQueuedPrompt":
+          await this.sendQueuedPrompt(msg.id);
           break;
         case "requestSuggestions":
           await this.handleRequestSuggestions(msg.kind, msg.query);
@@ -598,6 +618,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.fileEdits.clear();
       this.changeReviewItems.clear();
       this.replayBuffer = [];
+      this.clearPromptQueue();
       this.post({ type: "clear" });
       this.postChangeReview();
       this.post({ type: "sessionLoading", title: this.uiText("チャットを読み込み中...", "Loading chat...") });
@@ -1261,6 +1282,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.client = undefined;
       this.busy = false;
       this.stopping = false;
+      this.clearPromptQueue();
       this.post({ type: "running", running: false });
       this.setRunningContext(false);
     });
@@ -1277,8 +1299,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       await this.client?.cancel();
     } catch (err) {
+      if (!this.stopping) {
+        return;
+      }
+
       const message = err instanceof Error ? err.message : String(err);
       this.post({ type: "error", text: this.uiText(`停止に失敗しました: ${message}`, `Failed to stop: ${message}`) });
+      this.drainAfterCancel = false;
       this.stopping = false;
       this.busy = false;
       this.post({ type: "running", running: false });
@@ -1293,6 +1320,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    const shouldDrain = this.drainAfterCancel;
+    this.drainAfterCancel = false;
+    this.promptGeneration++;
     this.stopping = false;
     this.busy = false;
     this.post({ type: "cancelled" });
@@ -1300,6 +1330,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: "running", running: false });
     this.setRunningContext(false);
     this.postConfig();
+
+    if (shouldDrain) {
+      void this.drainQueue();
+    }
   }
 
   private async handleNewChat(): Promise<void> {
@@ -1317,6 +1351,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.changeReviewItems.clear();
     this.busy = false;
     this.stopping = false;
+    this.clearPromptQueue();
     this.setRunningContext(false);
     this.replayAssistantOpen = false;
     this.post({ type: "clear" });
@@ -1383,7 +1418,97 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private async handleSend(text: string, images?: PromptImageAttachment[]): Promise<void> {
     const trimmed = text.trim();
     const sanitizedImages = sanitizeImageAttachments(images);
-    if ((!trimmed && sanitizedImages.length === 0) || this.busy) {
+    if (!trimmed && sanitizedImages.length === 0) {
+      return;
+    }
+
+    if (this.busy) {
+      this.enqueuePrompt(trimmed, sanitizedImages);
+      return;
+    }
+
+    await this.sendNow(trimmed, sanitizedImages);
+  }
+
+  private enqueuePrompt(text: string, images: PromptImageAttachment[]): void {
+    this.promptQueue.push({
+      id: `q-${++this.queueSeq}`,
+      text,
+      images,
+      kind: "queue",
+    });
+    this.postQueue();
+  }
+
+  private removeQueuedPrompt(id: string): void {
+    const next = this.promptQueue.filter((item) => item.id !== id);
+    if (next.length === this.promptQueue.length) {
+      return;
+    }
+    this.promptQueue = next;
+    this.postQueue();
+  }
+
+  private async sendQueuedPrompt(id: string): Promise<void> {
+    const index = this.promptQueue.findIndex((item) => item.id === id);
+    if (index < 0) {
+      return;
+    }
+
+    const [item] = this.promptQueue.splice(index, 1);
+
+    if (this.busy) {
+      this.promptQueue.unshift({ ...item, kind: "interrupt" });
+      this.postQueue();
+      this.drainAfterCancel = true;
+      if (!this.stopping) {
+        await this.handleCancel();
+      }
+      return;
+    }
+
+    this.postQueue();
+    await this.sendNow(item.text, item.images);
+  }
+
+  private clearPromptQueue(): void {
+    if (this.promptQueue.length === 0 && !this.drainAfterCancel) {
+      this.postQueue();
+      return;
+    }
+    this.promptQueue = [];
+    this.drainAfterCancel = false;
+    this.postQueue();
+  }
+
+  private postQueue(): void {
+    this.post({
+      type: "promptQueue",
+      items: this.promptQueue.map((item) => ({
+        id: item.id,
+        text: item.text,
+        kind: item.kind,
+        imageCount: item.images.length,
+      })),
+    });
+  }
+
+  private async drainQueue(): Promise<void> {
+    if (this.busy || this.stopping) {
+      return;
+    }
+
+    const next = this.promptQueue.shift();
+    this.postQueue();
+    if (!next) {
+      return;
+    }
+
+    await this.sendNow(next.text, next.images);
+  }
+
+  private async sendNow(text: string, images: PromptImageAttachment[]): Promise<void> {
+    if (this.busy || (!text && images.length === 0)) {
       return;
     }
 
@@ -1393,19 +1518,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const root = this.workspaceRoot || process.cwd();
-    const promptBlocks = await buildPromptBlocks(trimmed, root, sanitizedImages);
-
+    const generation = ++this.promptGeneration;
     this.busy = true;
     this.stopping = false;
     this.setRunningContext(true);
-    this.post({ type: "userMessage", text: trimmed, images: sanitizedImages });
+    this.post({ type: "userMessage", text, images });
     this.post({ type: "assistantStart" });
     this.post({ type: "running", running: true, stopping: false });
     this.postConfig();
 
     try {
+      const root = this.workspaceRoot || process.cwd();
+      const promptBlocks = await buildPromptBlocks(text, root, images);
       const result = await this.client!.prompt(promptBlocks);
+
+      if (generation !== this.promptGeneration) {
+        return;
+      }
 
       if (this.stopping || result.stopReason === "cancelled" || result.stopReason === "canceled") {
         this.finishCancel();
@@ -1417,7 +1546,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({ type: "running", running: false });
       this.setRunningContext(false);
       this.postConfig();
+      await this.drainQueue();
     } catch (err) {
+      if (generation !== this.promptGeneration) {
+        return;
+      }
+
       if (this.stopping) {
         this.finishCancel();
         return;
@@ -1540,6 +1674,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         <li><kbd>@</kbd><span>${this.uiText("ファイル・フォルダをコンテキストに追加", "Add files and folders as context")}</span></li>
         <li><kbd>/</kbd><span>${this.uiText("コマンド・スキルを呼び出す", "Invoke commands and skills")}</span></li>
         <li><kbd>Shift</kbd><span class="kbd-plus">+</span><kbd>Enter</kbd><span>${this.uiText("改行を挿入", "Insert a new line")}</span></li>
+        <li><kbd>Enter</kbd><span>${this.uiText("実行中はキューに追加", "While running, add to the queue")}</span></li>
       </ul>
     </div>
     <button id="jumpBottom" class="jump-bottom hidden" type="button" title="${this.uiText("最新のメッセージへ", "Jump to the latest message")}">
@@ -1561,6 +1696,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div class="composer-card">
       <div id="contextTray" class="context-tray hidden" aria-label="${this.uiText("添付コンテキスト", "Attached context")}"></div>
       <div id="attachmentTray" class="attachment-tray hidden" aria-label="${this.uiText("添付画像", "Attached images")}"></div>
+      <div id="queueTray" class="queue-tray hidden" aria-label="${this.uiText("送信キュー", "Send queue")}"></div>
       <textarea id="input" rows="1" placeholder="${this.uiText("質問や指示を入力（@ でコンテキスト、画像貼り付け可）", "Ask a question or enter an instruction (@ for context, paste images)")}"></textarea>
       <div class="composer-footer">
         <div class="composer-meta">

@@ -18,6 +18,7 @@ The chat UI follows your VS Code display language and supports English and Japan
 - Add workspace files and folders with `@` references
 - Use slash commands and workspace prompt files
 - Paste images into prompts
+- Queue follow-up prompts while the agent is running
 - Review tool permissions and file changes
 - Open diffs and revert supported file changes
 - Browse and restore previous sessions when supported by the installed CLI
@@ -58,6 +59,8 @@ If the `agent` command is not on your PATH, set `cursorAgent.agentPath` in VS Co
 ## Usage
 
 - Press **Enter** to send a prompt. Press **Shift+Enter** to insert a new line.
+- While the agent is running, you can keep typing. **Enter** adds the follow-up to the queue.
+- Queued prompts appear above the composer with **Send now** and **×**. Send now cancels the current turn and sends that prompt immediately. **Stop** cancels the current turn and keeps the queue.
 - Type `@` to search for workspace files and folders to include as context.
 - Use slash commands such as `/review` when they are available in your workspace.
 - Paste an image into the composer to attach it to your prompt.
