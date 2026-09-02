@@ -12,6 +12,12 @@ import {
 
 export type AgentMode = "agent" | "plan" | "ask";
 
+export interface PlanTodo {
+  id: string;
+  content: string;
+  status: "pending" | "in_progress" | "completed" | "cancelled";
+}
+
 export type PromptContentBlock =
   | { type: "text"; text: string }
   | { type: "image"; mimeType: string; data: string };
@@ -56,6 +62,33 @@ export function validateAgentPath(agentPath: string): string {
   }
 
   return normalized;
+}
+
+function parsePlanTodos(raw: unknown): PlanTodo[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const todos: PlanTodo[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") {
+      continue;
+    }
+    const rec = item as Record<string, unknown>;
+    if (typeof rec.content !== "string" || !rec.content.trim()) {
+      continue;
+    }
+    const status = rec.status;
+    todos.push({
+      id: typeof rec.id === "string" && rec.id ? rec.id : String(todos.length + 1),
+      content: rec.content,
+      status:
+        status === "in_progress" || status === "completed" || status === "cancelled"
+          ? status
+          : "pending",
+    });
+  }
+  return todos;
 }
 
 export class AcpClient extends EventEmitter {
@@ -500,6 +533,7 @@ export class AcpClient extends EventEmitter {
               name: params?.name as string | undefined,
               overview: params?.overview as string | undefined,
               plan: params?.plan as string | undefined,
+              todos: parsePlanTodos(params?.todos),
               resolve: wrappedResolve,
             });
           })

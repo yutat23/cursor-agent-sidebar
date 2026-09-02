@@ -4,7 +4,9 @@
   const TEXT = {
     taskStopping: ["停止しています...", "Stopping..."],
     taskRunning: ["エージェント実行中...", "Agent is running..."],
+    planWaiting: ["プランの承認待ち", "Waiting for plan approval"],
     followupPlaceholder: ["フォローアップを入力...", "Enter a follow-up..."],
+    planFollowupPlaceholder: ["プランへの指示を入力して送信...", "Send instructions to revise the plan..."],
     promptPlaceholder: ["質問や指示を入力（@ でコンテキスト追加）", "Ask a question or enter an instruction (@ for context)"],
     sendTitle: ["送信 (Enter)", "Send (Enter)"],
     queueTitle: ["キューに追加 (Enter)", "Add to queue (Enter)"],
@@ -46,6 +48,11 @@
     allowedOnce: ["許可しました", "Allowed"],
     allowedAlways: ["常に許可しました", "Always allowed"],
     rejected: ["拒否しました", "Denied"],
+    approvePlan: ["承認", "Approve"],
+    rejectPlan: ["拒否", "Reject"],
+    planTitle: ["プラン", "Plan"],
+    planApproved: ["承認しました", "Approved"],
+    planRejected: ["拒否しました", "Rejected"],
     copy: ["コピー", "Copy"],
     copyMessage: ["メッセージをコピー", "Copy message"],
     imageTooLarge: ["画像は 5MB 以下にしてください", "Images must be 5 MB or smaller"],
@@ -128,6 +135,7 @@
 
   let busy = false;
   let stopping = false;
+  let waitingForPlan = false;
   let currentTurn = null;
   let currentAssistantEl = null;
   let currentToolPanel = null;
@@ -165,20 +173,32 @@
     vscode.postMessage({ type: "cancel" });
   }
 
-  function setRunning(running, isStopping) {
+  function setRunning(running, isStopping, isWaitingForPlan) {
     busy = running;
     stopping = !!isStopping;
+    waitingForPlan = !!isWaitingForPlan;
 
     sendBtn.classList.remove("hidden");
     stopBtn.classList.toggle("hidden", !running);
-    footerSpinner.classList.toggle("hidden", !running || isStopping);
+    footerSpinner.classList.toggle("hidden", !running || isStopping || waitingForPlan);
     taskStatus.classList.toggle("hidden", !running);
+    taskStatus.classList.toggle("is-waiting-plan", waitingForPlan);
 
-    taskLabel.textContent = isStopping ? t("taskStopping") : t("taskRunning");
-    inputEl.placeholder = running
-      ? t("followupPlaceholder")
-      : t("promptPlaceholder");
-    sendBtn.title = running ? t("queueTitle") : t("sendTitle");
+    taskLabel.textContent = isStopping
+      ? t("taskStopping")
+      : waitingForPlan
+        ? t("planWaiting")
+        : t("taskRunning");
+    inputEl.placeholder = waitingForPlan
+      ? t("planFollowupPlaceholder")
+      : running
+        ? t("followupPlaceholder")
+        : t("promptPlaceholder");
+    sendBtn.title = running && !waitingForPlan ? t("queueTitle") : t("sendTitle");
+
+    if (currentAssistantEl) {
+      currentAssistantEl.classList.toggle("typing", running && !isStopping && !waitingForPlan);
+    }
 
     updateInteractiveState();
 
@@ -1234,6 +1254,86 @@
         actions.innerHTML = `<span class="permission-resolved">${t("cancelled")}</span>`;
       }
     });
+  }
+
+  function dismissPlanCards() {
+    document.querySelectorAll(".plan-card.pending").forEach((card) => {
+      card.classList.remove("pending");
+      card.classList.add("dismissed");
+      const actions = card.querySelector(".permission-actions");
+      if (actions) {
+        actions.innerHTML = `<span class="permission-resolved">${t("cancelled")}</span>`;
+      }
+    });
+  }
+
+  function planTodoMark(status) {
+    if (status === "completed") {
+      return "✓";
+    }
+    if (status === "in_progress") {
+      return "●";
+    }
+    if (status === "cancelled") {
+      return "×";
+    }
+    return "○";
+  }
+
+  function showPlanCard(msg) {
+    const card = document.createElement("div");
+    card.className = "permission-card plan-card pending";
+    card.dataset.requestId = msg.id;
+
+    const title = escapeHtml(msg.name || t("planTitle"));
+    const overview = msg.overview
+      ? `<div class="plan-overview">${escapeHtml(msg.overview)}</div>`
+      : "";
+    const planText = typeof msg.plan === "string" ? msg.plan : "";
+    const body = planText
+      ? `<div class="plan-body assistant-text rendered">${renderMarkdown(planText, { highlight: true })}</div>`
+      : "";
+    const todos = Array.isArray(msg.todos) ? msg.todos : [];
+    const todosHtml = todos.length
+      ? `<ul class="plan-todos">${todos.map((todo) => {
+          const status = todo.status || "pending";
+          return `<li class="plan-todo plan-todo-${escapeHtml(status)}"><span class="plan-todo-mark">${planTodoMark(status)}</span><span>${escapeHtml(todo.content || "")}</span></li>`;
+        }).join("")}</ul>`
+      : "";
+
+    card.innerHTML = `
+      <div class="permission-header">
+        <span class="permission-icon">☰</span>
+        <div class="permission-copy">
+          <div class="permission-title">${title}</div>
+          ${overview}
+        </div>
+      </div>
+      ${body}
+      ${todosHtml}
+      <div class="permission-actions">
+        <button type="button" class="perm-btn perm-allow" data-outcome="accepted">${t("approvePlan")}</button>
+        <button type="button" class="perm-btn perm-deny" data-outcome="rejected">${t("rejectPlan")}</button>
+      </div>
+    `;
+
+    card.querySelectorAll(".perm-btn").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (!card.classList.contains("pending")) {
+          return;
+        }
+        const outcome = btn.dataset.outcome;
+        const label = outcome === "accepted" ? t("planApproved") : t("planRejected");
+        vscode.postMessage({ type: "planResponse", id: msg.id, outcome });
+        card.classList.remove("pending");
+        card.classList.add("resolved");
+        card.querySelector(".permission-actions").innerHTML =
+          `<span class="permission-resolved">${label}</span>`;
+      });
+    });
+
+    ensureActivityPanel().appendChild(card);
+    scrollToBottom();
   }
 
   function showPermissionCard(msg) {
@@ -2703,6 +2803,7 @@
         renderQueueTray([]);
         setRunning(false, false);
         dismissPermissionCards();
+        dismissPlanCards();
         stickToBottom = true;
         jumpBottom.classList.add("hidden");
         break;
@@ -2721,7 +2822,7 @@
         break;
 
       case "running":
-        setRunning(!!msg.running, !!msg.stopping);
+        setRunning(!!msg.running, !!msg.stopping, !!msg.waitingForPlan);
         break;
 
       case "assistantChunk": {
@@ -2765,6 +2866,10 @@
         showPermissionCard(msg);
         break;
 
+      case "planRequest":
+        showPlanCard(msg);
+        break;
+
       case "fileEdit":
         upsertFileEditCard(msg);
         break;
@@ -2779,6 +2884,7 @@
 
       case "cancelled": {
         dismissPermissionCards();
+        dismissPlanCards();
         finalizeToolPanel();
         settleThoughtBlocks();
         if (currentAssistantEl) {

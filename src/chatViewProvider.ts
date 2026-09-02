@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
-import { AcpClient, AgentMode, validateAgentPath } from "./acpClient";
+import { AcpClient, AgentMode, PlanTodo, validateAgentPath } from "./acpClient";
 import { AcpSessionInfo, formatCurrentModelLabel, SessionPickerConfig } from "./sessionConfig";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
@@ -22,6 +22,7 @@ type WebviewMessage =
   | { type: "setModel"; modelId: string }
   | { type: "setModelParameter"; configId: string; value: string }
   | { type: "permissionResponse"; id: string; decision: string }
+  | { type: "planResponse"; id: string; outcome: string }
   | { type: "requestPermissionState" }
   | { type: "removePermissionRule"; id: string }
   | { type: "clearPermissionHistory" }
@@ -53,6 +54,10 @@ interface PermissionRequestState {
   title: string;
   kind?: string;
   presentation: PermissionPresentation;
+}
+
+interface PlanRequestState {
+  resolve: (outcome: string) => void;
 }
 
 interface PermissionRule {
@@ -184,6 +189,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private sessionConfig?: SessionPickerConfig;
   private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
+  private planRequests = new Map<string, PlanRequestState>();
+  private planCounter = 0;
   private fileEdits = new Map<string, FileEditCardData>();
   private changeReviewItems = new Map<string, ChangeReviewItem>();
   private workspaceRoot = "";
@@ -261,6 +268,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "permissionResponse":
           await this.resolvePermission(msg.id, msg.decision);
+          break;
+        case "planResponse":
+          this.resolvePlan(msg.id, msg.outcome);
           break;
         case "requestPermissionState":
           this.postPermissionState();
@@ -1050,6 +1060,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     request.resolve(decision === "allow-always" ? "allow-once" : decision);
   }
 
+  private resolvePlan(id: string, outcome: string): void {
+    const request = this.planRequests.get(id);
+    if (!request) {
+      return;
+    }
+    this.planRequests.delete(id);
+    request.resolve(outcome === "accepted" ? "accepted" : "rejected");
+    this.postRunning();
+  }
+
+  private cancelPendingPlans(): void {
+    for (const request of this.planRequests.values()) {
+      request.resolve("cancelled");
+    }
+    this.planRequests.clear();
+  }
+
+  private postRunning(): void {
+    this.post({
+      type: "running",
+      running: this.busy,
+      stopping: this.stopping,
+      waitingForPlan: this.planRequests.size > 0 && this.busy && !this.stopping,
+    });
+  }
+
   private formatPermission(title: string, kind?: string): PermissionPresentation {
     const quoted = title.match(/"([^"]+)"/);
     const path = quoted?.[1] ?? title;
@@ -1243,31 +1279,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     client.on(
       "createPlan",
-      async ({
+      ({
         name,
         overview,
         plan,
+        todos,
         resolve,
       }: {
         name?: string;
         overview?: string;
         plan?: string;
+        todos?: PlanTodo[];
         resolve: (outcome: string) => void;
       }) => {
-        const doc = await vscode.workspace.openTextDocument({
-          content: `# ${name ?? "Plan"}\n\n${overview ? `## Overview\n${overview}\n\n` : ""}${plan ?? ""}`,
-          language: "markdown",
+        const id = String(++this.planCounter);
+        this.planRequests.set(id, { resolve });
+        this.view?.show?.(true);
+        this.post({
+          type: "planRequest",
+          id,
+          name: name ?? this.uiText("プラン", "Plan"),
+          overview: overview ?? "",
+          plan: plan ?? "",
+          todos: todos ?? [],
         });
-        await vscode.window.showTextDocument(doc, { preview: true });
-
-        const choice = await vscode.window.showInformationMessage(
-          this.uiText("プランを承認しますか？", "Do you approve this plan?"),
-          { modal: true },
-          this.uiText("承認", "Approve"),
-          this.uiText("拒否", "Reject")
-        );
-
-        resolve(choice === this.uiText("承認", "Approve") ? "accepted" : "rejected");
+        this.postRunning();
       }
     );
 
@@ -1283,7 +1319,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.busy = false;
       this.stopping = false;
       this.clearPromptQueue();
-      this.post({ type: "running", running: false });
+      this.postRunning();
       this.setRunningContext(false);
     });
   }
@@ -1293,8 +1329,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    this.cancelPendingPlans();
     this.stopping = true;
-    this.post({ type: "running", running: true, stopping: true });
+    this.postRunning();
 
     try {
       await this.client?.cancel();
@@ -1308,7 +1345,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.drainAfterCancel = false;
       this.stopping = false;
       this.busy = false;
-      this.post({ type: "running", running: false });
+      this.postRunning();
       this.setRunningContext(false);
       this.post({ type: "assistantDone", stopReason: "error" });
       this.postConfig();
@@ -1327,7 +1364,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.busy = false;
     this.post({ type: "cancelled" });
     this.post({ type: "assistantDone", stopReason: "cancelled" });
-    this.post({ type: "running", running: false });
+    this.postRunning();
     this.setRunningContext(false);
     this.postConfig();
 
@@ -1346,6 +1383,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     this.sessionConfig = undefined;
+    this.cancelPendingPlans();
     this.permissionRequests.clear();
     this.fileEdits.clear();
     this.changeReviewItems.clear();
@@ -1422,12 +1460,31 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (this.planRequests.size > 0) {
+      await this.interruptWithPrompt(trimmed, sanitizedImages);
+      return;
+    }
+
     if (this.busy) {
       this.enqueuePrompt(trimmed, sanitizedImages);
       return;
     }
 
     await this.sendNow(trimmed, sanitizedImages);
+  }
+
+  private async interruptWithPrompt(text: string, images: PromptImageAttachment[]): Promise<void> {
+    this.promptQueue.unshift({
+      id: `q-${++this.queueSeq}`,
+      text,
+      images,
+      kind: "interrupt",
+    });
+    this.postQueue();
+    this.drainAfterCancel = true;
+    if (!this.stopping) {
+      await this.handleCancel();
+    }
   }
 
   private enqueuePrompt(text: string, images: PromptImageAttachment[]): void {
@@ -1524,7 +1581,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.setRunningContext(true);
     this.post({ type: "userMessage", text, images });
     this.post({ type: "assistantStart" });
-    this.post({ type: "running", running: true, stopping: false });
+    this.postRunning();
     this.postConfig();
 
     try {
@@ -1543,7 +1600,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       this.busy = false;
       this.post({ type: "assistantDone", stopReason: result.stopReason });
-      this.post({ type: "running", running: false });
+      this.postRunning();
       this.setRunningContext(false);
       this.postConfig();
       await this.drainQueue();
@@ -1566,7 +1623,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.busy = false;
       this.post({ type: "error", text: message });
       this.post({ type: "assistantDone", stopReason: "error" });
-      this.post({ type: "running", running: false });
+      this.postRunning();
       this.setRunningContext(false);
       this.postConfig();
     }
