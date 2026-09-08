@@ -203,6 +203,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private usageCache?: CursorUsageSnapshot;
   private usageFetchedAt = 0;
   private usageInFlight?: Promise<void>;
+  private readonly output: vscode.OutputChannel;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -210,6 +211,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.mode = extensionContext.globalState.get<AgentMode>("cursorAgent.mode", "agent");
     this.modelId = extensionContext.globalState.get<string>("cursorAgent.modelId", "default");
+    this.output = vscode.window.createOutputChannel("Cursor Agent");
+    extensionContext.subscriptions.push(this.output);
   }
 
   private uiText(japanese: string, english: string): string {
@@ -1313,7 +1316,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       }
     });
 
+    client.on("log", (text: string) => {
+      this.output.appendLine(`[${new Date().toISOString()}] ${text}`);
+    });
+
     client.on("exit", (code) => {
+      this.output.appendLine(`[${new Date().toISOString()}] agent process exited (code: ${code})`);
       this.post({ type: "error", text: this.uiText(`エージェントプロセスが終了しました (code: ${code})`, `The agent process exited (code: ${code})`) });
       this.client = undefined;
       this.busy = false;

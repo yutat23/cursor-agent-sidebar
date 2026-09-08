@@ -46,10 +46,45 @@ interface JsonRpcMessage {
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
-  error?: { message?: string; code?: number };
+  error?: { message?: string; code?: number; data?: unknown };
 }
 
 type InteractionRelease = () => void;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Builds a readable message from a JSON-RPC error. The Cursor CLI reports the
+ * actual reason in `error.data.message` (e.g. "Invalid model value: x") while
+ * `error.message` is only the generic "Invalid params", so include both.
+ */
+export function formatRpcError(error: { message?: string; code?: number; data?: unknown }): string {
+  const base = error.message ?? "ACP error";
+  const data = error.data;
+  if (data === undefined || data === null) {
+    return base;
+  }
+
+  let detail: string;
+  if (typeof data === "string") {
+    detail = data;
+  } else if (typeof data === "object" && typeof (data as { message?: unknown }).message === "string") {
+    detail = (data as { message: string }).message;
+  } else {
+    try {
+      detail = JSON.stringify(data);
+    } catch {
+      detail = String(data);
+    }
+  }
+
+  if (!detail || detail === base) {
+    return base;
+  }
+  return `${base}: ${detail}`;
+}
 
 export function validateAgentPath(agentPath: string): string {
   const normalized = agentPath.trim();
@@ -157,6 +192,11 @@ export class AcpClient extends EventEmitter {
       this.cleanup();
     });
 
+    this.process.on("error", (err) => {
+      this.emit("log", `Failed to start the agent process: ${err.message}`);
+      this.cleanup(err);
+    });
+
     const initResult = (await this.send("initialize", {
       protocolVersion: 1,
       clientCapabilities: {
@@ -233,8 +273,28 @@ export class AcpClient extends EventEmitter {
     this.sessionId = result.sessionId;
     let config = parseSessionConfig(result);
 
+    // A previously saved model may no longer be offered by the CLI (models get
+    // renamed or retired between releases). Restoring it must never break the
+    // connection, so only try when the CLI still lists it and fall back to the
+    // session's current model if the CLI rejects it anyway.
     if (preferredModelId && config.currentModelId !== preferredModelId) {
-      config = await this.setModel(preferredModelId);
+      const available = config.models.some((m) => m.id === preferredModelId);
+      if (!available) {
+        this.emit(
+          "log",
+          `Saved model "${preferredModelId}" is not offered by the agent; using "${config.currentModelId}" instead`
+        );
+      } else {
+        try {
+          config = await this.setModel(preferredModelId);
+        } catch (err) {
+          this.emit("log", `Could not restore model "${preferredModelId}": ${errorMessage(err)}`);
+        }
+      }
+    }
+
+    if (config.currentModelId !== preferredModelId) {
+      return config;
     }
 
     for (const param of preferredParams) {
@@ -245,7 +305,11 @@ export class AcpClient extends EventEmitter {
       if (!current.options.some((o) => o.value === param.value)) {
         continue;
       }
-      config = await this.setModelParameter(param.id, param.value);
+      try {
+        config = await this.setModelParameter(param.id, param.value);
+      } catch (err) {
+        this.emit("log", `Could not restore model parameter "${param.id}=${param.value}": ${errorMessage(err)}`);
+      }
     }
 
     return config;
@@ -357,11 +421,11 @@ export class AcpClient extends EventEmitter {
     }
   }
 
-  private cleanup(): void {
+  private cleanup(cause?: Error): void {
     this.rl?.close();
     this.rl = undefined;
     for (const [, waiter] of this.pending) {
-      waiter.reject(new Error("ACP process exited"));
+      waiter.reject(cause ?? new Error("ACP process exited"));
     }
     this.pending.clear();
   }
@@ -402,7 +466,7 @@ export class AcpClient extends EventEmitter {
       if (waiter) {
         this.pending.delete(msg.id);
         if (msg.error) {
-          waiter.reject(new Error(msg.error.message ?? "ACP error"));
+          waiter.reject(new Error(formatRpcError(msg.error)));
         } else {
           waiter.resolve(msg.result);
         }
