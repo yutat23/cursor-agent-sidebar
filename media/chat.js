@@ -37,6 +37,10 @@
     tool: ["ツール", "Tool"],
     changeReview: ["変更レビュー", "Change review"],
     noChanges: ["まだ変更はありません", "No changes yet"],
+    workedFor: ["作業時間 {0}", "Worked for {0}"],
+    fileChanged: ["{0} ファイルを変更", "{0} file changed"],
+    filesChanged: ["{0} ファイルを変更", "{0} files changed"],
+    review: ["レビュー", "Review"],
     openDiff: ["差分を開く", "Open diff"],
     open: ["開く", "Open"],
     revert: ["戻す", "Revert"],
@@ -145,6 +149,9 @@
   let fileEditCards = new Map();
   // Segments (text, thinking, tools, file edits) are appended to turnBody in arrival order.
   let turnBody = null;
+  let workingEl = null;
+  let turnStartedAt = 0;
+  let turnEdits = new Map();
   let thinkingStart = 0;
   let pendingMarkdownRender = 0;
   let pendingThinkingRender = 0;
@@ -199,6 +206,7 @@
     if (currentAssistantEl) {
       currentAssistantEl.classList.toggle("typing", running && !isStopping && !waitingForPlan);
     }
+    updateWorkingIndicator();
 
     updateInteractiveState();
 
@@ -1373,6 +1381,7 @@
         card.classList.add("resolved");
         card.querySelector(".permission-actions").innerHTML =
           `<span class="permission-resolved">${label}</span>`;
+        updateWorkingIndicator();
       });
     });
 
@@ -2167,9 +2176,6 @@
 
   function appendUserMessage(text, images) {
     const turn = ensureTurn("user");
-    const label = document.createElement("div");
-    label.className = "turn-label";
-    label.textContent = "You";
 
     const body = document.createElement("div");
     body.className = "user-message-body";
@@ -2200,7 +2206,6 @@
       attachMessageCopy(body, text);
     }
 
-    turn.appendChild(label);
     turn.appendChild(body);
     // 自分の送信時は必ず最下部に移動して追従を再開する
     stickToBottom = true;
@@ -2319,14 +2324,8 @@
     if (!currentTurn || !currentTurn.classList.contains("turn-assistant")) {
       currentTurn = ensureTurn("assistant");
 
-      const label = document.createElement("div");
-      label.className = "turn-label";
-      label.textContent = "Agent";
-
       turnBody = document.createElement("div");
       turnBody.className = "turn-body";
-
-      currentTurn.appendChild(label);
       currentTurn.appendChild(turnBody);
     }
     return currentTurn;
@@ -2368,6 +2367,92 @@
     if (kind !== "edits") fileEditsPanel = null;
   }
 
+  // Pulsing dots at the end of the turn whenever the agent is working but nothing else shows it.
+  function updateWorkingIndicator() {
+    const show =
+      busy &&
+      !stopping &&
+      !waitingForPlan &&
+      !!turnBody &&
+      !currentAssistantEl &&
+      !turnBody.querySelector(".permission-card.pending");
+
+    if (!show) {
+      workingEl?.remove();
+      return;
+    }
+    if (!workingEl) {
+      workingEl = document.createElement("div");
+      workingEl.className = "turn-working";
+      workingEl.innerHTML = "<span></span><span></span><span></span>";
+    }
+    if (turnBody.lastElementChild !== workingEl) {
+      turnBody.appendChild(workingEl);
+      scrollToBottom();
+    }
+  }
+
+  function formatElapsed(ms) {
+    const total = Math.max(1, Math.round(ms / 1000));
+    const minutes = Math.floor(total / 60);
+    const seconds = total % 60;
+    return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
+  }
+
+  function appendTurnFooter() {
+    if (!turnBody) return;
+
+    const files = new Map();
+    for (const edit of turnEdits.values()) {
+      const entry = files.get(edit.path) || { added: 0, removed: 0 };
+      entry.added += edit.added;
+      entry.removed += edit.removed;
+      files.set(edit.path, entry);
+    }
+    if (!turnStartedAt && files.size === 0) return;
+
+    const footer = document.createElement("div");
+    footer.className = "turn-footer";
+
+    if (turnStartedAt) {
+      const time = document.createElement("span");
+      time.className = "turn-footer-time";
+      time.textContent = t("workedFor", formatElapsed(Date.now() - turnStartedAt));
+      footer.appendChild(time);
+    }
+
+    if (files.size > 0) {
+      let added = 0;
+      let removed = 0;
+      for (const entry of files.values()) {
+        added += entry.added;
+        removed += entry.removed;
+      }
+      const changes = document.createElement("button");
+      changes.type = "button";
+      changes.className = "turn-footer-changes";
+      changes.innerHTML = `
+        <span>${escapeHtml(t(files.size === 1 ? "fileChanged" : "filesChanged", files.size))}</span>
+        <span class="turn-footer-added">+${added}</span>
+        <span class="turn-footer-removed">-${removed}</span>
+        <span class="turn-footer-review">${escapeHtml(t("review"))}</span>
+      `;
+      changes.addEventListener("click", (e) => {
+        e.stopPropagation();
+        toggleMenu("changes");
+      });
+      footer.appendChild(changes);
+    }
+
+    turnBody.appendChild(footer);
+  }
+
+  // The last text segment of a finished turn is the answer; earlier ones are progress notes.
+  function markFinalText() {
+    const texts = turnBody?.querySelectorAll(":scope > .assistant-text");
+    texts?.[texts.length - 1]?.classList.add("is-final");
+  }
+
   function ensureAssistantText() {
     beginSegment("text");
     if (!currentAssistantEl) {
@@ -2394,18 +2479,44 @@
     }
   }
 
-  function updateExploredSummary(panel) {
-    const done = panel.querySelectorAll(".explored-row.is-done").length;
-    const total = panel.querySelectorAll(".explored-row").length;
-    const summary = panel.querySelector(".explored-summary");
+  const EXPLORE_KINDS = ["read", "search", "fetch", "grep", "glob", "list", "think"];
+  const RUN_KINDS = ["execute", "shell", "terminal", "command"];
 
-    if (total === 0) {
-      summary.textContent = "Explored";
-    } else if (done < total) {
-      summary.textContent = `Explored ${total} tools`;
-    } else {
-      summary.textContent = `Explored ${total} ${total === 1 ? "tool" : "tools"}`;
+  function toolCategory(kind, title) {
+    const k = (kind || "").toLowerCase();
+    if (EXPLORE_KINDS.includes(k)) return "explore";
+    if (RUN_KINDS.includes(k)) return "run";
+    if (k && k !== "other") return "other";
+    if ((title || "").startsWith("`")) return "run";
+    if (/^(read|grep|search|glob|list|find|fetch)\b/i.test(title || "")) return "explore";
+    return "other";
+  }
+
+  function updateExploredSummary(panel) {
+    const rows = [...panel.querySelectorAll(".explored-row")];
+    const summary = panel.querySelector(".explored-summary");
+    const running = rows.filter((row) => row.classList.contains("is-running")).pop();
+    panel.classList.toggle("is-running", !!running);
+
+    if (running) {
+      summary.textContent = `${running.querySelector(".label").textContent}…`;
+      return;
     }
+    if (rows.length === 0) {
+      summary.textContent = "Explored";
+      return;
+    }
+
+    const counts = { explore: 0, run: 0, other: 0 };
+    for (const row of rows) {
+      counts[row.dataset.category || "other"] += 1;
+    }
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+    const parts = [];
+    if (counts.explore) parts.push(`Explored ${plural(counts.explore, "tool", "tools")}`);
+    if (counts.run) parts.push(`Ran ${plural(counts.run, "command", "commands")}`);
+    if (counts.other) parts.push(`Used ${plural(counts.other, "tool", "tools")}`);
+    summary.textContent = parts.join(" · ");
   }
 
   function ensureToolPanel() {
@@ -2445,6 +2556,7 @@
       row = document.createElement("li");
       row.className = "explored-row";
       row.innerHTML = `<span class="dot"></span><span class="label"></span>`;
+      row.dataset.category = toolCategory(msg.kind, msg.title);
       list.appendChild(row);
       toolRows.set(rowKey, row);
       // tool_call_update often omits title; keep a readable placeholder only for new rows.
@@ -2514,6 +2626,11 @@
   }
 
   function upsertFileEditCard(msg) {
+    turnEdits.set(msg.id, {
+      path: msg.path,
+      added: msg.addedLines || 0,
+      removed: msg.removedLines || 0,
+    });
     let card = fileEditCards.get(msg.id);
 
     if (!card) {
@@ -2556,6 +2673,10 @@
     fileEditsPanel = null;
     fileEditCards = new Map();
     turnBody = null;
+    workingEl?.remove();
+    workingEl = null;
+    turnStartedAt = 0;
+    turnEdits = new Map();
     thinkingStart = 0;
   }
 
@@ -2847,7 +2968,9 @@
 
       case "assistantStart":
         resetTurnState();
+        turnStartedAt = Date.now();
         setRunning(true, false);
+        ensureAssistantTurn();
         break;
 
       case "running":
@@ -2940,6 +3063,11 @@
         if (currentAssistantEl) {
           currentAssistantEl.classList.remove("typing");
           scheduleAssistantMarkdownRender(currentAssistantEl, { final: true });
+        }
+        workingEl?.remove();
+        markFinalText();
+        if (!["replay", "error", "cancelled"].includes(msg.stopReason)) {
+          appendTurnFooter();
         }
         resetTurnState();
         setRunning(false, false);
@@ -3075,6 +3203,9 @@
       }
     }
   });
+
+  // Runs after the handler above, once every message has updated the turn.
+  window.addEventListener("message", () => updateWorkingIndicator());
 
   setRunning(false, false);
   setBootState("loading", t("connecting"));

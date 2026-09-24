@@ -803,6 +803,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({
       type: "toolActivity",
       id: parsed.toolCallId,
+      kind: parsed.kind,
       title: parsed.activityTitle ?? parsed.title,
       status: parsed.status ?? "in_progress",
       isUpdate: update.sessionUpdate === "tool_call_update",

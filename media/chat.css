@@ -210,21 +210,8 @@ kbd {
   border-color: var(--vscode-focusBorder, var(--vscode-panel-border));
 }
 
-.turn-label {
-  font-size: 10px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--vscode-descriptionForeground);
-  opacity: 0.9;
-}
-
 .turn-user {
   align-items: flex-end;
-}
-
-.turn-user .turn-label {
-  padding-right: 4px;
 }
 
 .turn-user .user-message-body {
@@ -359,6 +346,100 @@ kbd {
   flex-direction: column;
   gap: 6px;
   width: 100%;
+}
+
+/* Replies read as plain prose; tools, edits and cards keep their own chrome. */
+.turn-body > .assistant-text {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0 2px;
+}
+
+/* Progress notes get a hover-only copy button that takes no space. */
+.turn-body > .assistant-text:not(.is-final) > .message-actions {
+  position: absolute;
+  top: -3px;
+  right: 0;
+  min-height: 0;
+  margin: 0;
+  border-radius: 4px;
+  background: var(--vscode-sideBar-background);
+}
+
+.turn-assistant:hover .turn-body > .assistant-text:not(.is-final) > .message-actions {
+  opacity: 0;
+}
+
+.turn-assistant .turn-body > .assistant-text:not(.is-final):hover > .message-actions,
+.turn-body > .assistant-text:not(.is-final) > .message-actions:focus-within {
+  opacity: 1;
+}
+
+.turn-working {
+  display: flex;
+  gap: 4px;
+  padding: 4px 2px;
+}
+
+.turn-working span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+  animation: working-dot 1.2s ease-in-out infinite;
+}
+
+.turn-working span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.turn-working span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes working-dot {
+  0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-2px); }
+}
+
+.turn-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  padding: 2px 2px 0;
+  font-size: 11.5px;
+  color: var(--vscode-descriptionForeground);
+}
+
+.turn-footer-changes {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--vscode-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.turn-footer-changes:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.turn-footer-added {
+  color: var(--vscode-gitDecoration-addedResourceForeground, #73c991);
+}
+
+.turn-footer-removed {
+  color: var(--vscode-gitDecoration-deletedResourceForeground, #f14c4c);
+}
+
+.turn-footer-review {
+  color: var(--vscode-textLink-foreground);
 }
 
 .assistant-text {
@@ -879,6 +960,20 @@ kbd {
 .explored-toggle .chevron {
   font-size: 10px;
   transition: transform 0.15s;
+}
+
+.explored-toggle {
+  max-width: 100%;
+}
+
+.explored-summary {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.explored-block.is-running .explored-summary {
+  animation: pulse 1.6s ease-in-out infinite;
 }
 
 .explored-block.collapsed .chevron {
