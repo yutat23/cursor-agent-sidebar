@@ -354,16 +354,11 @@ kbd {
   align-items: stretch;
 }
 
-.activity-panel {
+.turn-body {
   display: flex;
   flex-direction: column;
   gap: 6px;
   width: 100%;
-}
-
-.response-panel {
-  width: 100%;
-  margin-top: 2px;
 }
 
 .assistant-text {

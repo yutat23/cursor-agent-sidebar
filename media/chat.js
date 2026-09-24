@@ -143,8 +143,8 @@
   let currentThinkingEl = null;
   let fileEditsPanel = null;
   let fileEditCards = new Map();
-  let activityPanel = null;
-  let responsePanel = null;
+  // Segments (text, thinking, tools, file edits) are appended to turnBody in arrival order.
+  let turnBody = null;
   let thinkingStart = 0;
   let pendingMarkdownRender = 0;
   let pendingThinkingRender = 0;
@@ -1332,7 +1332,8 @@
       });
     });
 
-    ensureActivityPanel().appendChild(card);
+    beginSegment("card");
+    appendSegment(card);
     scrollToBottom();
   }
 
@@ -1375,7 +1376,8 @@
       });
     });
 
-    ensureActivityPanel().appendChild(card);
+    beginSegment("card");
+    appendSegment(card);
     scrollToBottom();
   }
 
@@ -2321,30 +2323,57 @@
       label.className = "turn-label";
       label.textContent = "Agent";
 
-      activityPanel = document.createElement("div");
-      activityPanel.className = "activity-panel";
-
-      responsePanel = document.createElement("div");
-      responsePanel.className = "response-panel";
+      turnBody = document.createElement("div");
+      turnBody.className = "turn-body";
 
       currentTurn.appendChild(label);
-      currentTurn.appendChild(activityPanel);
-      currentTurn.appendChild(responsePanel);
+      currentTurn.appendChild(turnBody);
     }
     return currentTurn;
   }
 
-  function ensureActivityPanel() {
+  function appendSegment(el) {
     ensureAssistantTurn();
-    return activityPanel;
+    turnBody.appendChild(el);
+    return el;
+  }
+
+  function closeTextSegment() {
+    if (!currentAssistantEl) return;
+    const el = currentAssistantEl;
+    currentAssistantEl = null;
+    el.classList.remove("typing");
+    scheduleAssistantMarkdownRender(el, { final: true });
+  }
+
+  function closeThinkingSegment() {
+    if (!currentThinkingEl) return;
+    if (pendingThinkingRender) {
+      cancelAnimationFrame(pendingThinkingRender);
+      pendingThinkingRender = 0;
+    }
+    const body = currentThinkingEl.querySelector(".thought-body");
+    if (body) {
+      body.textContent = currentThinkingEl.__raw || "";
+    }
+    currentThinkingEl.classList.remove("is-live");
+    currentThinkingEl = null;
+  }
+
+  // Close every open segment except `kind`, so the next content starts a new segment below them.
+  function beginSegment(kind) {
+    if (kind !== "text") closeTextSegment();
+    if (kind !== "thinking") closeThinkingSegment();
+    if (kind !== "tools") currentToolPanel = null;
+    if (kind !== "edits") fileEditsPanel = null;
   }
 
   function ensureAssistantText() {
-    ensureAssistantTurn();
+    beginSegment("text");
     if (!currentAssistantEl) {
       currentAssistantEl = document.createElement("div");
       currentAssistantEl.className = "assistant-text typing";
-      responsePanel.appendChild(currentAssistantEl);
+      appendSegment(currentAssistantEl);
     }
     return currentAssistantEl;
   }
@@ -2367,7 +2396,7 @@
 
   function updateExploredSummary(panel) {
     const done = panel.querySelectorAll(".explored-row.is-done").length;
-    const total = toolRows.size;
+    const total = panel.querySelectorAll(".explored-row").length;
     const summary = panel.querySelector(".explored-summary");
 
     if (total === 0) {
@@ -2380,6 +2409,7 @@
   }
 
   function ensureToolPanel() {
+    beginSegment("tools");
     if (!currentToolPanel) {
       const block = document.createElement("div");
       block.className = "explored-block collapsed";
@@ -2396,22 +2426,22 @@
         block.querySelector(".explored-toggle").setAttribute("aria-expanded", collapsed ? "false" : "true");
       });
 
-      ensureActivityPanel().appendChild(block);
+      appendSegment(block);
       currentToolPanel = block;
-      toolRows = new Map();
     }
     return currentToolPanel;
   }
 
   function updateToolActivity(msg) {
-    const panel = ensureToolPanel();
-    const list = panel.querySelector(".explored-list");
     const rowKey = msg.id || msg.title || `tool-${toolRows.size}`;
     const st = statusLabel(msg.status);
     const isRunning = st === "running";
 
+    // Updates to an existing row stay in its original block; only new tools open a segment.
     let row = toolRows.get(rowKey);
+    const panel = row ? row.closest(".explored-block") : ensureToolPanel();
     if (!row) {
+      const list = panel.querySelector(".explored-list");
       row = document.createElement("li");
       row.className = "explored-row";
       row.innerHTML = `<span class="dot"></span><span class="label"></span>`;
@@ -2434,7 +2464,6 @@
     updateExploredSummary(currentToolPanel);
     currentToolPanel.classList.add("collapsed");
     currentToolPanel = null;
-    toolRows = new Map();
   }
 
   function settleThoughtBlocks() {
@@ -2475,19 +2504,20 @@
   }
 
   function ensureFileEditsPanel() {
+    beginSegment("edits");
     if (!fileEditsPanel) {
       fileEditsPanel = document.createElement("div");
       fileEditsPanel.className = "file-edits-panel";
-      ensureActivityPanel().appendChild(fileEditsPanel);
+      appendSegment(fileEditsPanel);
     }
     return fileEditsPanel;
   }
 
   function upsertFileEditCard(msg) {
-    const panel = ensureFileEditsPanel();
     let card = fileEditCards.get(msg.id);
 
     if (!card) {
+      const panel = ensureFileEditsPanel();
       card = document.createElement("button");
       card.type = "button";
       card.className = "file-edit-card";
@@ -2525,8 +2555,7 @@
     toolRows = new Map();
     fileEditsPanel = null;
     fileEditCards = new Map();
-    activityPanel = null;
-    responsePanel = null;
+    turnBody = null;
     thinkingStart = 0;
   }
 
@@ -2826,7 +2855,10 @@
         break;
 
       case "assistantChunk": {
-        currentThinkingEl?.classList.remove("is-live");
+        // Whitespace between tool calls shouldn't open an empty text segment.
+        if (!currentAssistantEl && !(msg.text || "").trim()) {
+          break;
+        }
         const el = ensureAssistantText();
         el.__raw = (el.__raw || "") + (msg.text || "");
         scheduleAssistantMarkdownRender(el);
@@ -2835,6 +2867,7 @@
 
       case "thinking":
         if (msg.append) {
+          beginSegment("thinking");
           if (!currentThinkingEl) {
             thinkingStart = Date.now();
             const block = document.createElement("div");
@@ -2850,7 +2883,7 @@
             block.querySelector(".thought-toggle").addEventListener("click", () => {
               block.classList.toggle("collapsed");
             });
-            ensureActivityPanel().appendChild(block);
+            appendSegment(block);
             currentThinkingEl = block;
           }
           currentThinkingEl.__raw = (currentThinkingEl.__raw || "") + (msg.text || "");
