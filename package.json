@@ -71,9 +71,9 @@
       "properties": {
         "cursorAgent.agentPath": {
           "type": "string",
-          "default": "agent",
+          "default": "",
           "scope": "machine",
-          "description": "Path to the Cursor CLI agent command. Use agent on PATH or an absolute path."
+          "description": "Path to the Cursor CLI agent command. Leave empty to use cursor-agent from PATH, or agent if cursor-agent is not found."
         },
         "cursorAgent.model": {
           "type": "string",

@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
-import { AcpClient, AgentMode, PlanTodo, validateAgentPath } from "./acpClient";
+import { AcpClient, AgentMode, PlanTodo, resolveAgentPath, validateAgentPath } from "./acpClient";
 import { AcpSessionInfo, formatCurrentModelLabel } from "./sessionConfig";
 import { ChangeReviewItem, ChatSession, PermissionPresentation, PermissionRequestState, ThreadMessage, Turn } from "./chatSession";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
@@ -305,6 +305,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private getAgentPath(): string {
+    return resolveAgentPath(vscode.workspace.getConfiguration("cursorAgent").get<string>("agentPath", ""));
+  }
+
   private getAutoApprovePermissions(): boolean {
     return vscode.workspace.getConfiguration("cursorAgent").get<boolean>("autoApprovePermissions", false);
   }
@@ -432,8 +436,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const epoch = this.connectEpoch;
     this.post({ type: "init", status: "loading", message: this.uiText("エージェントに接続中...", "Connecting to the agent...") });
 
-    const config = vscode.workspace.getConfiguration("cursorAgent");
-    const agentPath = config.get<string>("agentPath", "agent");
+    const agentPath = this.getAgentPath();
     const autoApprove = this.getAutoApprovePermissions();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     this.workspaceRoot = cwd;
@@ -718,8 +721,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleRunDiagnostics(): Promise<void> {
-    const config = vscode.workspace.getConfiguration("cursorAgent");
-    const agentPath = config.get<string>("agentPath", "agent");
+    const agentPath = this.getAgentPath();
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
 
     this.post({

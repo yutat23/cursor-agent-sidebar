@@ -48,7 +48,7 @@ This extension does not include or redistribute the Cursor CLI.
 3. Open the secondary sidebar from **View > Appearance > Secondary Side Bar**.
 4. Select **Cursor Agent** and start chatting.
 
-If the `agent` command is not on your PATH, set `cursorAgent.agentPath` in VS Code settings. On Windows, for example:
+The extension starts the Cursor CLI as `cursor-agent` from your PATH, or as `agent` if `cursor-agent` is not found. Grok Build also installs a command named `agent`, so `cursor-agent` is preferred to avoid starting Grok by mistake. If neither command is on your PATH, set `cursorAgent.agentPath` in VS Code settings. On Windows, for example:
 
 ```json
 {
@@ -78,7 +78,7 @@ Use this option only when you understand and trust the requested operations.
 
 | Setting | Description | Default |
 | --- | --- | --- |
-| `cursorAgent.agentPath` | Path to the Cursor CLI agent command. | `agent` |
+| `cursorAgent.agentPath` | Path to the Cursor CLI agent command. Leave empty to use `cursor-agent` (or `agent`) from PATH. | Empty |
 | `cursorAgent.model` | Model to use. Leave empty for the default model. | Empty |
 | `cursorAgent.autoApprovePermissions` | Automatically approve tool requests. | `false` |
 

@@ -1,4 +1,6 @@
 import { spawn, ChildProcessWithoutNullStreams } from "node:child_process";
+import * as fs from "node:fs";
+import * as nodePath from "node:path";
 import * as readline from "node:readline";
 import { EventEmitter } from "node:events";
 import {
@@ -84,6 +86,38 @@ export function formatRpcError(error: { message?: string; code?: number; data?: 
     return base;
   }
   return `${base}: ${detail}`;
+}
+
+function isOnPath(command: string): boolean {
+  const extensions =
+    process.platform === "win32" ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT").split(";") : [""];
+  for (const dir of (process.env.PATH ?? "").split(nodePath.delimiter)) {
+    if (!dir) {
+      continue;
+    }
+    for (const ext of extensions) {
+      try {
+        fs.accessSync(nodePath.join(dir, command + ext), fs.constants.X_OK);
+        return true;
+      } catch {
+        // keep looking
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Picks the command that starts the Cursor CLI. Grok Build also installs a
+ * command named "agent", usually ahead of Cursor's on PATH, so unless the user
+ * chose one, prefer "cursor-agent", which only the Cursor CLI installs.
+ */
+export function resolveAgentPath(configured: string | undefined): string {
+  const trimmed = configured?.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  return isOnPath("cursor-agent") ? "cursor-agent" : "agent";
 }
 
 export function validateAgentPath(agentPath: string): string {
