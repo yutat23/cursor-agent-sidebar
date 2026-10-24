@@ -126,6 +126,8 @@ function parsePlanTodos(raw: unknown): PlanTodo[] {
   return todos;
 }
 
+const CANCEL_TIMEOUT_MS = 5_000;
+
 export class AcpClient extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | undefined;
   private rl: readline.Interface | undefined;
@@ -134,6 +136,7 @@ export class AcpClient extends EventEmitter {
   private sessionId: string | undefined;
   private disposed = false;
   private running = false;
+  private promptRun = 0;
   private interactionReleases = new Set<InteractionRelease>();
   private supportsSessionList = false;
   private supportsLoadSession = false;
@@ -369,6 +372,7 @@ export class AcpClient extends EventEmitter {
     }
 
     this.running = true;
+    this.promptRun++;
     try {
       const result = (await this.send("session/prompt", {
         sessionId: this.sessionId,
@@ -388,20 +392,25 @@ export class AcpClient extends EventEmitter {
 
     this.releaseBlockedInteractions();
 
-    if (!this.sessionId) {
+    if (!this.sessionId || !this.running) {
       this.running = false;
       this.emit("cancelled");
       return;
     }
 
-    try {
-      await this.send("session/cancel", { sessionId: this.sessionId });
-    } catch {
-      // ignore if already finished
-    } finally {
-      this.running = false;
-      this.emit("cancelled");
-    }
+    // session/cancel is a notification in ACP. Sent as a request, the agent
+    // rejects it with "Method not found" and keeps working.
+    this.notify("session/cancel", { sessionId: this.sessionId });
+
+    // The pending session/prompt resolves with stopReason "cancelled".
+    // Fall back in case the agent never answers.
+    const run = this.promptRun;
+    setTimeout(() => {
+      if (this.running && this.promptRun === run) {
+        this.running = false;
+        this.emit("cancelled");
+      }
+    }, CANCEL_TIMEOUT_MS);
   }
 
   dispose(): void {
@@ -442,6 +451,14 @@ export class AcpClient extends EventEmitter {
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
     });
+  }
+
+  private notify(method: string, params?: Record<string, unknown>): void {
+    if (!this.process) {
+      return;
+    }
+    const payload = JSON.stringify({ jsonrpc: "2.0", method, params }) + "\n";
+    this.process.stdin.write(payload);
   }
 
   private respond(id: number, result: unknown): void {

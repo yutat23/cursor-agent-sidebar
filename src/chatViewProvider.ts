@@ -1596,6 +1596,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     try {
       const root = this.workspaceRoot || process.cwd();
       const promptBlocks = await buildPromptBlocks(text, root, images);
+      if (generation !== this.promptGeneration) {
+        return;
+      }
       const result = await this.client!.prompt(promptBlocks);
 
       if (generation !== this.promptGeneration) {
