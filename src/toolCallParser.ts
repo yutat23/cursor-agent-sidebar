@@ -86,6 +86,59 @@ function getLanguageInfo(filePath: string): { language: string; icon: string } {
   };
 }
 
+const PREVIEW_LIMIT = 14;
+// Above this many cells the line diff would cost too much; the changed middle
+// is then reported as replaced wholesale.
+const MAX_DIFF_CELLS = 2_000_000;
+
+/** Changed lines between two texts, in order, from a longest-common-subsequence diff. */
+function diffLines(oldLines: string[], newLines: string[]): DiffPreviewLine[] {
+  let start = 0;
+  while (start < oldLines.length && start < newLines.length && oldLines[start] === newLines[start]) {
+    start++;
+  }
+  let oldEnd = oldLines.length;
+  let newEnd = newLines.length;
+  while (oldEnd > start && newEnd > start && oldLines[oldEnd - 1] === newLines[newEnd - 1]) {
+    oldEnd--;
+    newEnd--;
+  }
+
+  const a = oldLines.slice(start, oldEnd);
+  const b = newLines.slice(start, newEnd);
+  if (a.length * b.length > MAX_DIFF_CELLS) {
+    return [
+      ...a.map((text) => ({ type: "remove" as const, text })),
+      ...b.map((text) => ({ type: "add" as const, text })),
+    ];
+  }
+
+  // lcs[i * width + j]: common subsequence length of a[i..] and b[j..].
+  const width = b.length + 1;
+  const lcs = new Uint32Array((a.length + 1) * width);
+  for (let i = a.length - 1; i >= 0; i--) {
+    for (let j = b.length - 1; j >= 0; j--) {
+      lcs[i * width + j] =
+        a[i] === b[j] ? lcs[(i + 1) * width + j + 1] + 1 : Math.max(lcs[(i + 1) * width + j], lcs[i * width + j + 1]);
+    }
+  }
+
+  const changes: DiffPreviewLine[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < a.length || j < b.length) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      i++;
+      j++;
+    } else if (i < a.length && (j === b.length || lcs[(i + 1) * width + j] >= lcs[i * width + j + 1])) {
+      changes.push({ type: "remove", text: a[i++] });
+    } else {
+      changes.push({ type: "add", text: b[j++] });
+    }
+  }
+  return changes;
+}
+
 function buildPreview(
   oldText: string | null | undefined,
   newText: string | undefined
@@ -96,43 +149,18 @@ function buildPreview(
 
   const newLines = newText.split("\n");
   if (!oldText) {
-    const previewLines = newLines.slice(0, 14).map((text) => ({ type: "add" as const, text }));
+    const previewLines = newLines.slice(0, PREVIEW_LIMIT).map((text) => ({ type: "add" as const, text }));
     return { addedLines: newLines.length, removedLines: 0, previewLines };
   }
 
-  const oldLines = oldText.split("\n");
-  const previewLines: DiffPreviewLine[] = [];
-  let addedLines = 0;
-  let removedLines = 0;
-  const maxLen = Math.max(oldLines.length, newLines.length);
-
-  for (let i = 0; i < maxLen; i++) {
-    const oldLine = oldLines[i];
-    const newLine = newLines[i];
-
-    if (oldLine === newLine) {
-      continue;
-    }
-
-    if (oldLine !== undefined && newLine === undefined) {
-      removedLines++;
-      if (previewLines.length < 14) {
-        previewLines.push({ type: "remove", text: oldLine });
-      }
-      continue;
-    }
-
-    if (newLine !== undefined) {
-      addedLines++;
-      if (previewLines.length < 14) {
-        previewLines.push({ type: "add", text: newLine });
-      }
-    }
-  }
+  const changes = diffLines(oldText.split("\n"), newLines);
+  const addedLines = changes.filter((line) => line.type === "add").length;
+  const removedLines = changes.length - addedLines;
+  const previewLines = changes.slice(0, PREVIEW_LIMIT);
 
   if (previewLines.length === 0) {
     newLines.slice(0, 10).forEach((text) => previewLines.push({ type: "add", text }));
-    addedLines = newLines.length;
+    return { addedLines: newLines.length, removedLines, previewLines };
   }
 
   return { addedLines, removedLines, previewLines };
