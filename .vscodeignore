@@ -8,3 +8,4 @@ tsconfig.json
 **/*.ts
 scripts/**
 test-acp.js
+dist/test/**

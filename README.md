@@ -101,6 +101,20 @@ To launch the extension in an Extension Development Host:
 2. Press **F5**.
 3. Open the **Cursor Agent** view from the secondary sidebar.
 
+To run the unit tests:
+
+```bash
+npm test
+```
+
+To run the end-to-end checks against the real Cursor CLI (it must be installed and signed in, and the checks send real agent requests):
+
+```bash
+npm run test:agent
+```
+
+To run one scenario with every message logged, run `VERBOSE=1 node scripts/agent-harness.cjs new-chat` after `npm run compile`. The scenarios are `new-chat`, `return-running`, `stop`, `todos`, and `question`.
+
 To build a VSIX package:
 
 ```bash

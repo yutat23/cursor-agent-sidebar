@@ -98,6 +98,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "node ./node_modules/typescript/bin/tsc -p ./",
     "watch": "node ./node_modules/typescript/bin/tsc -watch -p ./",
+    "test": "npm run compile && node --test \"dist/test/**/*.test.js\"",
+    "test:agent": "npm run compile && node scripts/agent-harness.cjs all",
     "package": "vsce package",
     "publish:marketplace": "vsce publish"
   },
