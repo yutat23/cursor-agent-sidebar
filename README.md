@@ -19,6 +19,9 @@ The chat UI follows your VS Code display language and supports English and Japan
 - Use slash commands and workspace prompt files
 - Paste images into prompts
 - Queue follow-up prompts while the agent is running
+- Start a new chat or open another one while the agent is working; the earlier chat keeps running and shows everything when you return
+- Follow the agent's todo list as it works
+- Answer the agent's questions from the chat
 - Review tool permissions and file changes
 - Open diffs and revert supported file changes
 - Browse and restore previous sessions when supported by the installed CLI
