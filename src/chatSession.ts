@@ -1,3 +1,4 @@
+import { PlanTodo } from "./acpClient";
 import { PromptImageAttachment } from "./promptBuilder";
 import { SessionPickerConfig } from "./sessionConfig";
 import { FileEditCardData } from "./toolCallParser";
@@ -60,11 +61,17 @@ export class ChatSession {
   readonly fileEdits = new Map<string, FileEditCardData>();
   // Tool kinds by tool call id; updates after the first usually omit the kind.
   readonly toolKinds = new Map<string, string>();
+  // Tool calls not shown as activity rows (the todo card already shows them).
+  readonly hiddenToolCalls = new Set<string>();
+  // The agent's todo list; it carries over between turns.
+  todos: PlanTodo[] = [];
   readonly changeReviewItems = new Map<string, ChangeReviewItem>();
   readonly permissionRequests = new Map<string, PermissionRequestState>();
   readonly planRequests = new Map<string, PlanRequestState>();
   private readonly thread: ThreadMessage[] = [];
   private assistantOpen = false;
+  // The current turn's todo card, updated in place as the list changes.
+  private turnTodos?: ThreadMessage;
 
   constructor(readonly id: string, config?: SessionPickerConfig) {
     this.config = config;
@@ -86,8 +93,19 @@ export class ChatSession {
   record(message: ThreadMessage): void {
     if (message.type === "assistantStart") {
       this.assistantOpen = true;
+      this.turnTodos = undefined;
     } else if (message.type === "assistantDone") {
       this.assistantOpen = false;
+    }
+
+    if (message.type === "todos") {
+      if (this.turnTodos) {
+        this.turnTodos.todos = message.todos;
+        return;
+      }
+      this.turnTodos = { ...message };
+      this.thread.push(this.turnTodos);
+      return;
     }
 
     const last = this.thread[this.thread.length - 1];
@@ -102,6 +120,25 @@ export class ChatSession {
       return;
     }
     this.thread.push({ ...message });
+  }
+
+  /** Applies a todo update from the agent: a full list, or changes merged by id. */
+  updateTodos(todos: PlanTodo[], merge: boolean): PlanTodo[] {
+    if (!merge) {
+      this.todos = todos;
+      return this.todos;
+    }
+    const next = [...this.todos];
+    for (const todo of todos) {
+      const index = next.findIndex((t) => t.id === todo.id);
+      if (index >= 0) {
+        next[index] = { ...next[index], ...todo };
+      } else {
+        next.push(todo);
+      }
+    }
+    this.todos = next;
+    return this.todos;
   }
 
   /** Drops an answered permission or plan card so it is not replayed as pending. */

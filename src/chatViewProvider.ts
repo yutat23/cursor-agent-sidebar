@@ -161,6 +161,10 @@ function permissionCategory(title: string, kind?: string): "change" | "command" 
   return "other";
 }
 
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+}
+
 function isUserMessageUpdate(sessionUpdate: string | undefined): boolean {
   return sessionUpdate === "user_message_chunk" || sessionUpdate === "user_message";
 }
@@ -873,6 +877,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
+    if (asRecord(update.rawInput)?._toolName === "updateTodos") {
+      session.hiddenToolCalls.add(parsed.toolCallId);
+    }
+    if (session.hiddenToolCalls.has(parsed.toolCallId)) {
+      return;
+    }
+
     // A status-only update for a file change moves its card along instead of
     // adding an activity row.
     const editInProgress = session.fileEdits.get(parsed.toolCallId);
@@ -1491,6 +1502,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
     );
+
+    client.on("todos", (sessionId: string | undefined, { todos, merge }: { todos: PlanTodo[]; merge: boolean }) => {
+      const session = this.sessionFor(sessionId);
+      if (!session) {
+        return;
+      }
+      this.postTo(session, { type: "todos", todos: session.updateTodos(todos, merge) });
+    });
 
     client.on("cancelled", (sessionId: string) => {
       const session = this.sessions.get(sessionId);

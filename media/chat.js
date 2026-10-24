@@ -55,6 +55,7 @@
     approvePlan: ["承認", "Approve"],
     rejectPlan: ["拒否", "Reject"],
     planTitle: ["プラン", "Plan"],
+    todoTitle: ["TODO", "To-dos"],
     planApproved: ["承認しました", "Approved"],
     planRejected: ["拒否しました", "Rejected"],
     copy: ["コピー", "Copy"],
@@ -1289,6 +1290,34 @@
     return "○";
   }
 
+  function renderTodoItems(todos) {
+    return todos.map((todo) => {
+      const status = todo.status || "pending";
+      return `<li class="plan-todo plan-todo-${escapeHtml(status)}"><span class="plan-todo-mark">${planTodoMark(status)}</span><span>${escapeHtml(todo.content || "")}</span></li>`;
+    }).join("");
+  }
+
+  // One card per turn; later updates from the agent rewrite it in place.
+  function showTodoCard(msg) {
+    const todos = Array.isArray(msg.todos) ? msg.todos : [];
+    let card = turnBody?.querySelector(".todo-card");
+    if (!card) {
+      card = document.createElement("div");
+      card.className = "todo-card";
+      beginSegment("card");
+      appendSegment(card);
+    }
+    const done = todos.filter((todo) => todo.status === "completed").length;
+    card.innerHTML = `
+      <div class="todo-header">
+        <span class="todo-title">${escapeHtml(t("todoTitle"))}</span>
+        <span class="todo-progress">${done}/${todos.length}</span>
+      </div>
+      <ul class="plan-todos">${renderTodoItems(todos)}</ul>
+    `;
+    scrollToBottom();
+  }
+
   function showPlanCard(msg) {
     const card = document.createElement("div");
     card.className = "permission-card plan-card pending";
@@ -1303,12 +1332,7 @@
       ? `<div class="plan-body assistant-text rendered">${renderMarkdown(planText, { highlight: true })}</div>`
       : "";
     const todos = Array.isArray(msg.todos) ? msg.todos : [];
-    const todosHtml = todos.length
-      ? `<ul class="plan-todos">${todos.map((todo) => {
-          const status = todo.status || "pending";
-          return `<li class="plan-todo plan-todo-${escapeHtml(status)}"><span class="plan-todo-mark">${planTodoMark(status)}</span><span>${escapeHtml(todo.content || "")}</span></li>`;
-        }).join("")}</ul>`
-      : "";
+    const todosHtml = todos.length ? `<ul class="plan-todos">${renderTodoItems(todos)}</ul>` : "";
 
     card.innerHTML = `
       <div class="permission-header">
@@ -3025,6 +3049,10 @@
 
       case "planRequest":
         showPlanCard(msg);
+        break;
+
+      case "todos":
+        showTodoCard(msg);
         break;
 
       case "fileEdit":

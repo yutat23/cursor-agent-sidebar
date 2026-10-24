@@ -536,11 +536,21 @@ export class AcpClient extends EventEmitter {
       case "cursor/create_plan":
         void this.handleCreatePlan(msg.id!, msg.params);
         break;
+      // Both are requests: the agent waits for an answer before it goes on.
       case "cursor/update_todos":
-        this.emit("todos", msg.params);
+        this.emit("todos", paramSessionId(msg.params), {
+          todos: parsePlanTodos(msg.params?.todos),
+          merge: msg.params?.merge === true,
+        });
+        if (msg.id !== undefined) {
+          this.respond(msg.id, {});
+        }
         break;
       case "cursor/task":
-        this.emit("task", msg.params);
+        this.emit("task", paramSessionId(msg.params), msg.params);
+        if (msg.id !== undefined) {
+          this.respond(msg.id, {});
+        }
         break;
       default:
         if (msg.id !== undefined) {

@@ -1204,6 +1204,33 @@ kbd {
   color: var(--vscode-textLink-foreground, #3794ff);
 }
 
+/* ── Todo card ── */
+.todo-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+}
+
+.todo-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.todo-title {
+  font-weight: 600;
+}
+
+.todo-progress {
+  color: var(--vscode-descriptionForeground);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ── System / Error ── */
 .system-note {
   display: flex;
