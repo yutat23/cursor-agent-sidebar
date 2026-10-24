@@ -478,7 +478,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
     this.workspaceRoot = cwd;
 
-    const client = new AcpClient({ agentPath, cwd, autoApprovePermissions: autoApprove });
+    const clientVersion = (this.extensionContext.extension?.packageJSON as { version?: string } | undefined)?.version ?? "0.0.0";
+    const client = new AcpClient({ agentPath, cwd, autoApprovePermissions: autoApprove, clientVersion });
     this.client = client;
     this.bindClientEvents(client);
 

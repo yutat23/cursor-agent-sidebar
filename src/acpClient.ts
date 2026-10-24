@@ -28,6 +28,8 @@ export interface AcpClientOptions {
   agentPath: string;
   cwd: string;
   autoApprovePermissions: boolean;
+  // Sent to the agent as this client's version.
+  clientVersion: string;
 }
 
 export interface SessionUpdate {
@@ -254,7 +256,7 @@ export class AcpClient extends EventEmitter {
           parameterizedModelPicker: true,
         },
       },
-      clientInfo: { name: "cursor-agent-sidebar", version: "0.1.0" },
+      clientInfo: { name: "cursor-agent-sidebar", version: this.options.clientVersion },
     })) as {
       agentCapabilities?: {
         loadSession?: boolean;
