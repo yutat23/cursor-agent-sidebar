@@ -8,14 +8,14 @@
 //   npm run compile
 //   node scripts/agent-harness.cjs <scenario|all>     (VERBOSE=1 logs every message)
 //
-// Scenarios: new-chat, return-running, stop, todos, question
+// Scenarios: new-chat, return-running, stop, todos, question, mode
 const Module = require("node:module");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
-const SCENARIOS = ["new-chat", "return-running", "stop", "todos", "question"];
+const SCENARIOS = ["new-chat", "return-running", "stop", "todos", "question", "mode"];
 const extDir = path.resolve(__dirname, "..");
 const scenario = process.argv[2];
 
@@ -212,6 +212,17 @@ const scenarios = {
     check("the running chat comes back as running", since(iBack, "running").some((m) => m.running));
     await waitFor((m) => m.type === "assistantDone" && m.stopReason !== "replay", 150000);
     check("its answer streams in and the turn ends", textSince(iBack).length > 200, `${textSince(iBack).length} chars`);
+  },
+
+  // A new chat starts in the mode last picked (the CLI ignores it in session/new).
+  async mode(a) {
+    send({ type: "setMode", modeId: "plan" });
+    await waitFor((m) => m.type === "config" && m.currentModeId === "plan");
+    await newChat(a);
+    const config = posted.filter((m) => m.type === "config").at(-1);
+    check("a new chat starts in the mode last picked", config.currentModeId === "plan", config.currentModeId);
+    send({ type: "setMode", modeId: "ask" });
+    await waitFor((m) => m.type === "config" && m.currentModeId === "ask");
   },
 
   async stop() {

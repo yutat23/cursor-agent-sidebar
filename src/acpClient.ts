@@ -328,6 +328,15 @@ export class AcpClient extends EventEmitter {
     const sessionId = result.sessionId;
     let config = parseSessionConfig(result);
 
+    // The CLI ignores `mode` in session/new and always starts in agent mode.
+    if (config.currentModeId !== mode && config.modes.some((m) => m.id === mode)) {
+      try {
+        config = await this.setMode(sessionId, mode);
+      } catch (err) {
+        this.emit("log", `Could not start the new session in ${mode} mode: ${errorMessage(err)}`);
+      }
+    }
+
     // A previously saved model may no longer be offered by the CLI (models get
     // renamed or retired between releases). Restoring it must never break the
     // connection, so only try when the CLI still lists it and fall back to the
