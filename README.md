@@ -79,7 +79,7 @@ Use this option only when you understand and trust the requested operations.
 | Setting | Description | Default |
 | --- | --- | --- |
 | `cursorAgent.agentPath` | Path to the Cursor CLI agent command. Leave empty to use `cursor-agent` (or `agent`) from PATH. | Empty |
-| `cursorAgent.model` | Model to use. Leave empty for the default model. | Empty |
+| `cursorAgent.model` | Model to start new chats with. Leave empty to start with the model you last picked. | Empty |
 | `cursorAgent.autoApprovePermissions` | Automatically approve tool requests. | `false` |
 
 ## Privacy

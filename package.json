@@ -78,7 +78,7 @@
         "cursorAgent.model": {
           "type": "string",
           "default": "",
-          "description": "Model to use. Leave empty to use the default model."
+          "description": "Model ID to start new chats with. Leave empty to start with the model you last picked."
         },
         "cursorAgent.autoApprovePermissions": {
           "type": "boolean",

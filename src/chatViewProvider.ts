@@ -309,6 +309,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return resolveAgentPath(vscode.workspace.getConfiguration("cursorAgent").get<string>("agentPath", ""));
   }
 
+  // The setting picks the model for every new chat; otherwise a new chat starts
+  // with the model last picked in the view.
+  private getNewChatModel(): string {
+    const configured = vscode.workspace.getConfiguration("cursorAgent").get<string>("model", "").trim();
+    return configured || this.modelId;
+  }
+
   private getAutoApprovePermissions(): boolean {
     return vscode.workspace.getConfiguration("cursorAgent").get<boolean>("autoApprovePermissions", false);
   }
@@ -383,7 +390,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return undefined;
     }
 
-    const config = await client.newSession(this.mode, this.modelId);
+    const config = await client.newSession(this.mode, this.getNewChatModel());
     if (epoch !== this.connectEpoch || this.client !== client || client.isDisposed) {
       return undefined;
     }
