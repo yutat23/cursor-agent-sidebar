@@ -131,6 +131,36 @@ function extractUpdateText(content: unknown): string | undefined {
   return undefined;
 }
 
+// What a permission request is for. The tool kind decides when the agent sent
+// one; guessing from file extensions in the title called "npm test -- a.ts" a
+// file change. "Allow always" rules match on the result, so it must be stable.
+function permissionCategory(title: string, kind?: string): "change" | "command" | "read" | "other" {
+  switch (kind) {
+    case "edit":
+    case "delete":
+    case "move":
+    case "write":
+      return "change";
+    case "execute":
+      return "command";
+    case "read":
+    case "search":
+    case "fetch":
+      return "read";
+  }
+
+  if (/^\s*(write|edit|create|delete|patch)\b/i.test(title)) {
+    return "change";
+  }
+  if (/^\s*(`|(run|exec|execute|shell|command)\b)/i.test(title)) {
+    return "command";
+  }
+  if (/^\s*(read|glob|grep|search|find|list)\b/i.test(title)) {
+    return "read";
+  }
+  return "other";
+}
+
 function isUserMessageUpdate(sessionUpdate: string | undefined): boolean {
   return sessionUpdate === "user_message_chunk" || sessionUpdate === "user_message";
 }
@@ -1207,20 +1237,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private formatPermission(title: string, kind?: string): PermissionPresentation {
     const quoted = title.match(/"([^"]+)"/);
-    const path = quoted?.[1] ?? title;
-    const lower = `${kind ?? ""} ${title}`.toLowerCase();
+    const detail = quoted?.[1] ?? title;
 
-    if (lower.includes("write") || lower.includes("edit") || lower.includes("create") || /\.(bat|sh|ps1|js|ts|py|md|json)/i.test(path)) {
-      return { headline: this.uiText("ファイルの作成・変更", "File creation or change"), detail: path, icon: "📝" };
+    switch (permissionCategory(title, kind)) {
+      case "change":
+        return { headline: this.uiText("ファイルの作成・変更", "File creation or change"), detail, icon: "📝" };
+      case "command":
+        return { headline: this.uiText("コマンドの実行", "Command execution"), detail, icon: "⚡" };
+      case "read":
+        return { headline: this.uiText("ファイルの読み取り", "File reading"), detail, icon: "🔍" };
+      default:
+        return { headline: this.uiText("ツールの実行", "Tool execution"), detail, icon: "🔧" };
     }
-    if (lower.includes("run") || lower.includes("exec") || lower.includes("command") || lower.includes("shell")) {
-      return { headline: this.uiText("コマンドの実行", "Command execution"), detail: path, icon: "⚡" };
-    }
-    if (lower.includes("read") || lower.includes("glob") || lower.includes("search")) {
-      return { headline: this.uiText("ファイルの読み取り", "File reading"), detail: path, icon: "🔍" };
-    }
-
-    return { headline: this.uiText("ツールの実行", "Tool execution"), detail: path, icon: "🔧" };
   }
 
   private postConfig(): void {
