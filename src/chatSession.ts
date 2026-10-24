@@ -58,6 +58,8 @@ export class ChatSession {
   turn?: Turn;
   queue: QueuedPrompt[] = [];
   readonly fileEdits = new Map<string, FileEditCardData>();
+  // Tool kinds by tool call id; updates after the first usually omit the kind.
+  readonly toolKinds = new Map<string, string>();
   readonly changeReviewItems = new Map<string, ChangeReviewItem>();
   readonly permissionRequests = new Map<string, PermissionRequestState>();
   readonly planRequests = new Map<string, PlanRequestState>();

@@ -830,9 +830,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private async handleToolUpdate(session: ChatSession, update: Record<string, unknown>): Promise<void> {
-    const parsed = parseToolUpdate(update);
+    const parsed = parseToolUpdate(update, session.toolKinds);
     if (!parsed) {
       return;
+    }
+
+    // A status-only update for a file change moves its card along instead of
+    // adding an activity row.
+    const editInProgress = session.fileEdits.get(parsed.toolCallId);
+    if (!parsed.fileEdit && editInProgress && parsed.status) {
+      parsed.fileEdit = { ...editInProgress, status: parsed.status, previewLines: [] };
     }
 
     if (parsed.fileEdit) {
