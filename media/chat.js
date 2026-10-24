@@ -1425,7 +1425,7 @@
       updateWorkingIndicator();
     };
     submitBtn.addEventListener("click", () => finish(collect(), t("answered")));
-    card.querySelector('[data-action="skip"]').addEventListener("click", () => finish([], t("skipped")));
+    card.querySelector('[data-action="skip"]').addEventListener("click", () => finish(null, t("skipped")));
 
     beginSegment("card");
     appendSegment(card);

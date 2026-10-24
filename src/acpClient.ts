@@ -166,6 +166,8 @@ const CANCEL_TIMEOUT_MS = 5_000;
 
 export type SessionConfigWithId = SessionPickerConfig & { sessionId: string };
 
+type QuestionAnswers = Array<{ questionId: string; selectedOptionIds: string[] }>;
+
 function paramSessionId(params?: Record<string, unknown>): string | undefined {
   return typeof params?.sessionId === "string" ? params.sessionId : undefined;
 }
@@ -183,6 +185,9 @@ export class AcpClient extends EventEmitter {
   private disposed = false;
   // Prompts in flight, by session.
   private runningPrompts = new Map<string, number>();
+  // Sessions by tool call id, from tool call updates. cursor/* requests name
+  // only their tool call, not their session.
+  private toolCallSessions = new Map<string, string>();
   private promptRun = 0;
   // Interactions waiting for the user, by session ("" when the agent did not say).
   private interactionReleases = new Map<string, Set<InteractionRelease>>();
@@ -524,9 +529,15 @@ export class AcpClient extends EventEmitter {
     }
 
     switch (msg.method) {
-      case "session/update":
-        this.emit("update", paramSessionId(msg.params), msg.params?.update as Record<string, unknown>);
+      case "session/update": {
+        const sessionId = paramSessionId(msg.params);
+        const update = msg.params?.update as Record<string, unknown> | undefined;
+        if (sessionId && typeof update?.toolCallId === "string") {
+          this.toolCallSessions.set(update.toolCallId, sessionId);
+        }
+        this.emit("update", sessionId, update);
         break;
+      }
       case "session/request_permission":
         void this.handlePermission(msg.id!, msg.params);
         break;
@@ -538,7 +549,7 @@ export class AcpClient extends EventEmitter {
         break;
       // Both are requests: the agent waits for an answer before it goes on.
       case "cursor/update_todos":
-        this.emit("todos", paramSessionId(msg.params), {
+        this.emit("todos", this.requestSessionId(msg.params), {
           todos: parsePlanTodos(msg.params?.todos),
           merge: msg.params?.merge === true,
         });
@@ -547,7 +558,7 @@ export class AcpClient extends EventEmitter {
         }
         break;
       case "cursor/task":
-        this.emit("task", paramSessionId(msg.params), msg.params);
+        this.emit("task", this.requestSessionId(msg.params), msg.params);
         if (msg.id !== undefined) {
           this.respond(msg.id, {});
         }
@@ -558,6 +569,21 @@ export class AcpClient extends EventEmitter {
         }
         break;
     }
+  }
+
+  // The session a request from the agent belongs to: the one it names, else
+  // the one its tool call ran in, else the only session with a prompt running.
+  private requestSessionId(params?: Record<string, unknown>): string | undefined {
+    const named = paramSessionId(params);
+    if (named) {
+      return named;
+    }
+    const toolCallId = params?.toolCallId;
+    const fromToolCall = typeof toolCallId === "string" ? this.toolCallSessions.get(toolCallId) : undefined;
+    if (fromToolCall) {
+      return fromToolCall;
+    }
+    return this.runningPrompts.size === 1 ? [...this.runningPrompts.keys()][0] : undefined;
   }
 
   private trackInteraction<T>(
@@ -603,7 +629,7 @@ export class AcpClient extends EventEmitter {
       return;
     }
 
-    const sessionId = paramSessionId(params);
+    const sessionId = this.requestSessionId(params);
     const toolCall = params?.toolCall as { title?: string; kind?: string } | undefined;
     const title = toolCall?.title ?? "Tool permission request";
     const kind = toolCall?.kind;
@@ -623,7 +649,7 @@ export class AcpClient extends EventEmitter {
   }
 
   private async handleAskQuestion(id: number, params?: Record<string, unknown>): Promise<void> {
-    const sessionId = paramSessionId(params);
+    const sessionId = this.requestSessionId(params);
     const questions = (params?.questions as Array<{
       id: string;
       prompt: string;
@@ -636,7 +662,8 @@ export class AcpClient extends EventEmitter {
       const answers = await this.trackInteraction(
         sessionId,
         () =>
-          new Promise<Array<{ questionId: string; selectedOptionIds: string[] }>>((resolve) => {
+          // null when the user skips the questions.
+          new Promise<QuestionAnswers | null>((resolve) => {
             this.emit("askQuestion", {
               sessionId,
               title: params?.title as string | undefined,
@@ -647,12 +674,7 @@ export class AcpClient extends EventEmitter {
           })
       );
 
-      this.respond(id, {
-        outcome: {
-          outcome: "answered",
-          answers,
-        },
-      });
+      this.respond(id, { outcome: answers ? { outcome: "answered", answers } : { outcome: "skipped" } });
     } catch {
       abort.abort();
       this.respond(id, { outcome: { outcome: "cancelled" } });
@@ -660,7 +682,7 @@ export class AcpClient extends EventEmitter {
   }
 
   private async handleCreatePlan(id: number, params?: Record<string, unknown>): Promise<void> {
-    const sessionId = paramSessionId(params);
+    const sessionId = this.requestSessionId(params);
     let outcome: string;
     try {
       outcome = await this.trackInteraction(

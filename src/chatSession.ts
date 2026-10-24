@@ -26,7 +26,8 @@ export interface QuestionAnswer {
 }
 
 export interface QuestionRequestState {
-  resolve: (answers: QuestionAnswer[]) => void;
+  // null when the user skips the questions.
+  resolve: (answers: QuestionAnswer[] | null) => void;
 }
 
 export interface ChangeReviewItem {

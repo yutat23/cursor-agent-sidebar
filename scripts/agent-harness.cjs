@@ -241,6 +241,27 @@ const scenarios = {
     await open(a);
     const replayed = since(iBack, "todos");
     check("the card replays once, in its final state", replayed.length === 1 && replayed[0].todos.every((t) => t.status === "completed"));
+
+    // The CLI's todo requests name only a tool call, not a session; a chat in
+    // the background must still keep its own list.
+    const files = ["one.py", "two.py"];
+    send({
+      type: "send",
+      text: "Use your todo list tool to track two steps and mark each done as you go: 1) create one.py printing 1, 2) create two.py printing 2. Do not run shell commands.",
+    });
+    await waitFor((m) => m.type === "todos", 120000);
+    const b = await newChat(a);
+    const iB = posted.length;
+    for (let waited = 0; waited < 120000 && !files.every((f) => fs.existsSync(path.join(workspaceDir, f))); waited += 1000) {
+      await sleep(1000);
+    }
+    await sleep(5000);
+    check("a background chat's todos stay out of the shown chat", since(iB, "todos").length === 0);
+    const iA = posted.length;
+    await open(a);
+    const last = since(iA, "todos").at(-1);
+    check("the background chat's card has its steps done", last?.todos.some((t) => /one\.py/.test(t.content)) && last.todos.every((t) => t.status === "completed"));
+    await open(b);
   },
 
   // The agent rarely asks on request, so the question events are raised on the
@@ -278,8 +299,8 @@ const scenarios = {
     await open(a);
     const pending = since(iBack, "questionRequest");
     check("it waits as the only pending card when going back", pending.length === 1 && pending[0].questions[0].id === "go");
-    send({ type: "questionResponse", id: pending[0].id, answers: [] });
-    check("skipping answers with no choices", JSON.stringify(await q2.answered) === "[]");
+    send({ type: "questionResponse", id: pending[0].id, answers: null });
+    check("skipping tells the agent the questions were skipped", (await q2.answered) === null);
 
     const card3Seen = waitFor((m) => m.type === "questionRequest" && m.questions[0].id === "x");
     const q3 = ask([{ id: "x", prompt: "Withdrawn?", options: [{ id: "a", label: "A" }] }]);

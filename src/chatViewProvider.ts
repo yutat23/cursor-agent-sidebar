@@ -33,7 +33,7 @@ type WebviewMessage =
   | { type: "setModelParameter"; configId: string; value: string }
   | { type: "permissionResponse"; id: string; decision: string }
   | { type: "planResponse"; id: string; outcome: string }
-  | { type: "questionResponse"; id: string; answers: QuestionAnswer[] }
+  | { type: "questionResponse"; id: string; answers: QuestionAnswer[] | null }
   | { type: "requestPermissionState" }
   | { type: "removePermissionRule"; id: string }
   | { type: "clearPermissionHistory" }
@@ -253,7 +253,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.resolvePlan(msg.id, msg.outcome);
           break;
         case "questionResponse":
-          this.resolveQuestion(msg.id, Array.isArray(msg.answers) ? msg.answers : []);
+          this.resolveQuestion(msg.id, Array.isArray(msg.answers) ? msg.answers : null);
           break;
         case "requestPermissionState":
           this.postPermissionState();
@@ -1201,7 +1201,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private resolveQuestion(id: string, answers: QuestionAnswer[]): void {
+  private resolveQuestion(id: string, answers: QuestionAnswer[] | null): void {
     for (const session of this.sessions.values()) {
       const request = session.questionRequests.get(id);
       if (!request) {
@@ -1233,7 +1233,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     session.permissionRequests.clear();
     for (const [id, request] of session.questionRequests) {
       session.forget("questionRequest", id);
-      request.resolve([]);
+      request.resolve(null);
     }
     session.questionRequests.clear();
   }
@@ -1440,11 +1440,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           allowMultiple?: boolean;
         }>;
         signal: AbortSignal;
-        resolve: (answers: QuestionAnswer[]) => void;
+        resolve: (answers: QuestionAnswer[] | null) => void;
       }) => {
         const session = this.sessionFor(sessionId);
         if (!session) {
-          resolve([]);
+          resolve(null);
           return;
         }
 
