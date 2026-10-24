@@ -56,6 +56,11 @@
     rejectPlan: ["拒否", "Reject"],
     planTitle: ["プラン", "Plan"],
     todoTitle: ["TODO", "To-dos"],
+    questionTitle: ["エージェントからの質問", "Question from the agent"],
+    submitAnswer: ["回答", "Submit"],
+    skipQuestion: ["スキップ", "Skip"],
+    answered: ["回答しました", "Answered"],
+    skipped: ["スキップしました", "Skipped"],
     planApproved: ["承認しました", "Approved"],
     planRejected: ["拒否しました", "Rejected"],
     copy: ["コピー", "Copy"],
@@ -1364,6 +1369,63 @@
           `<span class="permission-resolved">${label}</span>`;
       });
     });
+
+    beginSegment("card");
+    appendSegment(card);
+    scrollToBottom();
+  }
+
+  function showQuestionCard(msg) {
+    const card = document.createElement("div");
+    card.className = "permission-card question-card pending";
+    card.dataset.requestId = msg.id;
+    const questions = Array.isArray(msg.questions) ? msg.questions : [];
+
+    const blocks = questions.map((q, qi) => {
+      const type = q.allowMultiple ? "checkbox" : "radio";
+      const options = (q.options || []).map((o) =>
+        `<label class="question-option"><input type="${type}" name="q-${escapeHtml(msg.id)}-${qi}" value="${escapeHtml(o.id)}"><span>${escapeHtml(o.label || o.id)}</span></label>`
+      ).join("");
+      return `<div class="question-block" data-question-id="${escapeHtml(q.id)}"><div class="question-prompt">${escapeHtml(q.prompt || "")}</div>${options}</div>`;
+    }).join("");
+
+    card.innerHTML = `
+      <div class="permission-header">
+        <span class="permission-icon">?</span>
+        <div class="permission-copy">
+          <div class="permission-title">${escapeHtml(msg.title || t("questionTitle"))}</div>
+        </div>
+      </div>
+      ${blocks}
+      <div class="permission-actions">
+        <button type="button" class="perm-btn perm-allow" data-action="submit" disabled>${t("submitAnswer")}</button>
+        <button type="button" class="perm-btn" data-action="skip">${t("skipQuestion")}</button>
+      </div>
+    `;
+
+    const collect = () => [...card.querySelectorAll(".question-block")].map((block) => ({
+      questionId: block.dataset.questionId,
+      selectedOptionIds: [...block.querySelectorAll("input:checked")].map((input) => input.value),
+    }));
+    const submitBtn = card.querySelector('[data-action="submit"]');
+    card.addEventListener("change", () => {
+      submitBtn.disabled = collect().some((answer) => answer.selectedOptionIds.length === 0);
+    });
+
+    const finish = (answers, label) => {
+      if (!card.classList.contains("pending")) {
+        return;
+      }
+      vscode.postMessage({ type: "questionResponse", id: msg.id, answers });
+      card.classList.remove("pending");
+      card.classList.add("resolved");
+      card.querySelectorAll("input").forEach((input) => { input.disabled = true; });
+      card.querySelector(".permission-actions").innerHTML =
+        `<span class="permission-resolved">${label}</span>`;
+      updateWorkingIndicator();
+    };
+    submitBtn.addEventListener("click", () => finish(collect(), t("answered")));
+    card.querySelector('[data-action="skip"]').addEventListener("click", () => finish([], t("skipped")));
 
     beginSegment("card");
     appendSegment(card);
@@ -3053,6 +3115,10 @@
 
       case "todos":
         showTodoCard(msg);
+        break;
+
+      case "questionRequest":
+        showQuestionCard(msg);
         break;
 
       case "fileEdit":

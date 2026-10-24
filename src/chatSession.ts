@@ -20,6 +20,15 @@ export interface PlanRequestState {
   resolve: (outcome: string) => void;
 }
 
+export interface QuestionAnswer {
+  questionId: string;
+  selectedOptionIds: string[];
+}
+
+export interface QuestionRequestState {
+  resolve: (answers: QuestionAnswer[]) => void;
+}
+
 export interface ChangeReviewItem {
   path: string;
   fileName: string;
@@ -68,6 +77,7 @@ export class ChatSession {
   readonly changeReviewItems = new Map<string, ChangeReviewItem>();
   readonly permissionRequests = new Map<string, PermissionRequestState>();
   readonly planRequests = new Map<string, PlanRequestState>();
+  readonly questionRequests = new Map<string, QuestionRequestState>();
   private readonly thread: ThreadMessage[] = [];
   private assistantOpen = false;
   // The current turn's todo card, updated in place as the list changes.
@@ -141,8 +151,8 @@ export class ChatSession {
     return this.todos;
   }
 
-  /** Drops an answered permission or plan card so it is not replayed as pending. */
-  forget(type: "permissionRequest" | "planRequest", id: string): void {
+  /** Drops an answered card so it is not replayed as pending. */
+  forget(type: "permissionRequest" | "planRequest" | "questionRequest", id: string): void {
     const index = this.thread.findIndex((m) => m.type === type && m.id === id);
     if (index >= 0) {
       this.thread.splice(index, 1);

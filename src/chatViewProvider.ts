@@ -4,7 +4,15 @@ import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { AcpClient, AgentMode, PlanTodo, resolveAgentPath, validateAgentPath } from "./acpClient";
 import { AcpSessionInfo, formatCurrentModelLabel } from "./sessionConfig";
-import { ChangeReviewItem, ChatSession, PermissionPresentation, PermissionRequestState, ThreadMessage, Turn } from "./chatSession";
+import {
+  ChangeReviewItem,
+  ChatSession,
+  PermissionPresentation,
+  PermissionRequestState,
+  QuestionAnswer,
+  ThreadMessage,
+  Turn,
+} from "./chatSession";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
 import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
@@ -24,6 +32,7 @@ type WebviewMessage =
   | { type: "setModelParameter"; configId: string; value: string }
   | { type: "permissionResponse"; id: string; decision: string }
   | { type: "planResponse"; id: string; outcome: string }
+  | { type: "questionResponse"; id: string; answers: QuestionAnswer[] }
   | { type: "requestPermissionState" }
   | { type: "removePermissionRule"; id: string }
   | { type: "clearPermissionHistory" }
@@ -188,6 +197,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private modelId = "default";
   private permissionCounter = 0;
   private planCounter = 0;
+  private questionCounter = 0;
   private workspaceRoot = "";
   private connectPromise?: Promise<void>;
   private connectEpoch = 0;
@@ -270,6 +280,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case "planResponse":
           this.resolvePlan(msg.id, msg.outcome);
+          break;
+        case "questionResponse":
+          this.resolveQuestion(msg.id, Array.isArray(msg.answers) ? msg.answers : []);
           break;
         case "requestPermissionState":
           this.postPermissionState();
@@ -1217,6 +1230,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
+  private resolveQuestion(id: string, answers: QuestionAnswer[]): void {
+    for (const session of this.sessions.values()) {
+      const request = session.questionRequests.get(id);
+      if (!request) {
+        continue;
+      }
+      session.questionRequests.delete(id);
+      session.forget("questionRequest", id);
+      request.resolve(answers);
+      return;
+    }
+  }
+
   private cancelPendingPlans(session: ChatSession): void {
     for (const [id, request] of session.planRequests) {
       session.forget("planRequest", id);
@@ -1234,6 +1260,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       request.resolve("reject-once");
     }
     session.permissionRequests.clear();
+    for (const [id, request] of session.questionRequests) {
+      session.forget("questionRequest", id);
+      request.resolve([]);
+    }
+    session.questionRequests.clear();
   }
 
   private postRunning(): void {
@@ -1422,7 +1453,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     client.on(
       "askQuestion",
-      async ({
+      ({
         sessionId,
         title,
         questions,
@@ -1438,28 +1469,36 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           allowMultiple?: boolean;
         }>;
         signal: AbortSignal;
-        resolve: (answers: Array<{ questionId: string; selectedOptionIds: string[] }>) => void;
+        resolve: (answers: QuestionAnswer[]) => void;
       }) => {
-        // Questions open a picker over the editor; do not ask on behalf of a chat that is not shown.
         const session = this.sessionFor(sessionId);
-        if (!session || !this.isActive(session)) {
+        if (!session) {
           resolve([]);
           return;
         }
 
-        const answers: Array<{ questionId: string; selectedOptionIds: string[] }> = [];
-
-        for (const q of questions) {
-          const picked = await this.pickQuestionOptions(q, title, signal);
-          if (!picked) {
-            resolve([]);
-            return;
-          }
-
-          answers.push({ questionId: q.id, selectedOptionIds: picked });
+        // Shown as a card in the chat; a session in the background keeps it
+        // until the user returns.
+        const id = String(++this.questionCounter);
+        session.questionRequests.set(id, { resolve });
+        signal.addEventListener("abort", () => {
+          session.questionRequests.delete(id);
+          session.forget("questionRequest", id);
+        });
+        this.postTo(session, {
+          type: "questionRequest",
+          id,
+          title,
+          questions: questions.map((q) => ({
+            id: q.id,
+            prompt: q.prompt,
+            options: q.options,
+            allowMultiple: q.allowMultiple === true,
+          })),
+        });
+        if (this.isActive(session)) {
+          this.view?.show?.(true);
         }
-
-        resolve(answers);
       }
     );
 
@@ -1544,46 +1583,6 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.postQueue();
       this.postRunning();
       this.setRunningContext(false);
-    });
-  }
-
-  private pickQuestionOptions(
-    question: { prompt: string; options: Array<{ id: string; label: string }>; allowMultiple?: boolean },
-    title: string | undefined,
-    signal: AbortSignal
-  ): Promise<string[] | undefined> {
-    if (signal.aborted) {
-      return Promise.resolve(undefined);
-    }
-
-    return new Promise((resolve) => {
-      const pick = vscode.window.createQuickPick<vscode.QuickPickItem & { id: string }>();
-      pick.items = question.options.map((o) => ({ label: o.label, id: o.id }));
-      pick.title = title ?? question.prompt;
-      pick.placeholder = question.prompt;
-      pick.ignoreFocusOut = true;
-      pick.canSelectMany = question.allowMultiple === true;
-
-      let settled = false;
-      const finish = (ids: string[] | undefined) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        pick.dispose();
-        resolve(ids && ids.length > 0 ? ids : undefined);
-      };
-      // The agent stopped waiting (the turn was cancelled), so close the picker.
-      const onAbort = () => finish(undefined);
-      signal.addEventListener("abort", onAbort);
-
-      pick.onDidAccept(() => {
-        const items = pick.canSelectMany ? pick.selectedItems : pick.activeItems;
-        finish(items.map((item) => item.id));
-      });
-      pick.onDidHide(() => finish(undefined));
-      pick.show();
     });
   }
 

@@ -1204,6 +1204,32 @@ kbd {
   color: var(--vscode-textLink-foreground, #3794ff);
 }
 
+/* ── Question card ── */
+.question-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.question-prompt {
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.question-option {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.perm-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ── Todo card ── */
 .todo-card {
   display: flex;
