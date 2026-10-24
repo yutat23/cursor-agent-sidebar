@@ -3,7 +3,8 @@ import { spawn } from "node:child_process";
 import * as nodePath from "node:path";
 import * as vscode from "vscode";
 import { AcpClient, AgentMode, PlanTodo, validateAgentPath } from "./acpClient";
-import { AcpSessionInfo, formatCurrentModelLabel, SessionPickerConfig } from "./sessionConfig";
+import { AcpSessionInfo, formatCurrentModelLabel } from "./sessionConfig";
+import { ChangeReviewItem, ChatSession, PermissionPresentation, PermissionRequestState, ThreadMessage, Turn } from "./chatSession";
 import { searchFileItems, searchSlashItems } from "./contextCatalog";
 import { buildPromptBlocks, getPromptContextPreview, PromptImageAttachment } from "./promptBuilder";
 import { loadSessionHistory, SessionHistoryMessage } from "./sessionHistory";
@@ -43,23 +44,6 @@ type WebviewMessage =
 
 const USAGE_CACHE_TTL_MS = 60_000;
 
-interface PermissionPresentation {
-  headline: string;
-  detail: string;
-  icon: string;
-}
-
-interface PermissionRequestState {
-  resolve: (decision: string) => void;
-  title: string;
-  kind?: string;
-  presentation: PermissionPresentation;
-}
-
-interface PlanRequestState {
-  resolve: (outcome: string) => void;
-}
-
 interface PermissionRule {
   id: string;
   headline: string;
@@ -75,25 +59,6 @@ interface PermissionHistoryItem {
   decision: string;
   autoApproved: boolean;
   createdAt: string;
-}
-
-interface ChangeReviewItem {
-  path: string;
-  fileName: string;
-  status: string;
-  addedLines: number;
-  removedLines: number;
-  previewLines: FileEditCardData["previewLines"];
-  previousText?: string | null;
-  canRevert: boolean;
-  updatedAt: string;
-}
-
-interface QueuedPrompt {
-  id: string;
-  text: string;
-  images: PromptImageAttachment[];
-  kind: "queue" | "interrupt";
 }
 
 const MODE_ICONS: Record<AgentMode, string> = {
@@ -178,25 +143,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private readonly locale: "ja" | "en" = vscode.env.language.toLowerCase().startsWith("ja") ? "ja" : "en";
   private view?: vscode.WebviewView;
   private client?: AcpClient;
-  private busy = false;
-  private stopping = false;
-  private drainAfterCancel = false;
-  private promptGeneration = 0;
+  // Every session this agent process knows about, shown or not.
+  private sessions = new Map<string, ChatSession>();
+  // The session shown in the view. Cleared the moment the user leaves it, so
+  // nothing from the old session lands in the next one while that is set up.
+  private activeId?: string;
+  private switchSeq = 0;
   private queueSeq = 0;
-  private promptQueue: QueuedPrompt[] = [];
   private mode: AgentMode = "agent";
   private modelId = "default";
-  private sessionConfig?: SessionPickerConfig;
-  private permissionRequests = new Map<string, PermissionRequestState>();
   private permissionCounter = 0;
-  private planRequests = new Map<string, PlanRequestState>();
   private planCounter = 0;
-  private fileEdits = new Map<string, FileEditCardData>();
-  private changeReviewItems = new Map<string, ChangeReviewItem>();
   private workspaceRoot = "";
-  private replayAssistantOpen = false;
-  private replayingSession = false;
-  private replayBuffer: Record<string, unknown>[] = [];
   private connectPromise?: Promise<void>;
   private connectEpoch = 0;
   private configSubscription?: vscode.Disposable;
@@ -235,10 +193,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     webviewView.webview.onDidReceiveMessage(async (msg: WebviewMessage) => {
       switch (msg.type) {
-        case "ready":
-          await this.ensureClient();
-          this.postQueue();
+        case "ready": {
+          await this.ensureClient().catch(() => undefined);
+          const session = this.active;
+          if (session) {
+            await this.show(session);
+          }
           break;
+        }
         case "send":
           await this.handleSend(msg.text, msg.images);
           break;
@@ -297,7 +259,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           this.postChangeReview();
           break;
         case "clearChangeReview":
-          this.changeReviewItems.clear();
+          this.active?.changeReviewItems.clear();
           this.postChangeReview();
           break;
         case "selectSession":
@@ -339,6 +301,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.configSubscription = undefined;
       this.client?.dispose();
       this.client = undefined;
+      this.forgetSessions();
     });
   }
 
@@ -395,7 +358,332 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   get isRunning(): boolean {
-    return this.busy;
+    return this.active?.turn !== undefined;
+  }
+
+  private get active(): ChatSession | undefined {
+    return this.activeId ? this.sessions.get(this.activeId) : undefined;
+  }
+
+  private isActive(session: ChatSession): boolean {
+    return session.id === this.activeId;
+  }
+
+  // Updates and requests that do not name a session belong to the one shown.
+  private sessionFor(sessionId: string | undefined): ChatSession | undefined {
+    return sessionId ? this.sessions.get(sessionId) : this.active;
+  }
+
+  private async createSession(client: AcpClient, epoch: number): Promise<ChatSession | undefined> {
+    if (epoch !== this.connectEpoch || this.client !== client || client.isDisposed) {
+      return undefined;
+    }
+
+    const config = await client.newSession(this.mode, this.modelId);
+    if (epoch !== this.connectEpoch || this.client !== client || client.isDisposed) {
+      return undefined;
+    }
+
+    const session = new ChatSession(config.sessionId, config);
+    this.sessions.set(session.id, session);
+    return session;
+  }
+
+  /** Shows a session in a view that already displays the right thread (empty, or kept after a reconnect). */
+  private async adopt(session: ChatSession): Promise<void> {
+    this.activeId = session.id;
+    await this.rememberConfig(session);
+    this.postChangeReview();
+    this.postQueue();
+    this.postRunning();
+    this.setRunningContext(session.turn !== undefined);
+  }
+
+  /** Redraws the view with everything the session has shown so far. */
+  private async show(session: ChatSession): Promise<void> {
+    this.activeId = session.id;
+    this.post({ type: "clear" });
+    for (const message of session.messages) {
+      this.post(message);
+    }
+    await this.adopt(session);
+  }
+
+  /** Stops showing the current session; it keeps running in the background. */
+  private leave(): number {
+    this.activeId = undefined;
+    this.setRunningContext(false);
+    this.post({ type: "clear" });
+    this.postChangeReview();
+    this.postQueue();
+    return ++this.switchSeq;
+  }
+
+  private async rememberConfig(session: ChatSession): Promise<void> {
+    if (session.config) {
+      this.mode = session.config.currentModeId;
+      this.modelId = session.config.currentModelId;
+      await this.savePreferences();
+    }
+    this.postConfig();
+  }
+
+  private async connectClient(): Promise<void> {
+    const epoch = this.connectEpoch;
+    this.post({ type: "init", status: "loading", message: this.uiText("エージェントに接続中...", "Connecting to the agent...") });
+
+    const config = vscode.workspace.getConfiguration("cursorAgent");
+    const agentPath = config.get<string>("agentPath", "agent");
+    const autoApprove = this.getAutoApprovePermissions();
+    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
+    this.workspaceRoot = cwd;
+
+    const client = new AcpClient({ agentPath, cwd, autoApprovePermissions: autoApprove });
+    this.client = client;
+    this.bindClientEvents(client);
+
+    try {
+      await client.start();
+      if (epoch !== this.connectEpoch) {
+        this.abandonClient(client);
+        return;
+      }
+
+      const session = await this.createSession(client, epoch);
+      if (!session) {
+        return;
+      }
+      if (!this.activeId) {
+        await this.adopt(session);
+      }
+
+      await this.refreshSessions();
+    } catch (err) {
+      if (epoch !== this.connectEpoch) {
+        this.abandonClient(client);
+        return;
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+      const errorMessage = this.uiText(`接続に失敗しました: ${message}`, `Connection failed: ${message}`);
+      this.post({ type: "init", status: "error", message: errorMessage });
+      this.post({ type: "error", text: errorMessage });
+      this.abandonClient(client);
+      throw err;
+    }
+  }
+
+  // The agent process holds the sessions; without it they are gone.
+  private forgetSessions(): void {
+    this.sessions.clear();
+    this.activeId = undefined;
+  }
+
+  private async handleRetryConnect(): Promise<void> {
+    if (this.isRunning) {
+      return;
+    }
+
+    this.connectEpoch++;
+    this.connectPromise = undefined;
+    this.client?.dispose();
+    this.client = undefined;
+    this.forgetSessions();
+    await this.ensureClient().catch(() => undefined);
+  }
+
+  private async handleNewChat(): Promise<void> {
+    this.connectEpoch++;
+    const pendingConnect = this.connectPromise;
+    this.connectPromise = undefined;
+
+    if (pendingConnect) {
+      await pendingConnect.catch(() => undefined);
+    }
+
+    const seq = this.leave();
+    this.post({ type: "init", status: "loading", message: this.uiText("新しいチャットを準備中...", "Preparing a new chat...") });
+
+    const epoch = this.connectEpoch;
+
+    try {
+      if (!this.client || this.client.isDisposed) {
+        await this.ensureClient();
+        return;
+      }
+
+      const session = await this.createSession(this.client, epoch);
+      if (!session || seq !== this.switchSeq) {
+        return;
+      }
+
+      await this.adopt(session);
+      await this.refreshSessions();
+    } catch (err) {
+      if (epoch !== this.connectEpoch) {
+        return;
+      }
+
+      const message = err instanceof Error ? err.message : String(err);
+      const errorMessage = this.uiText(`新しいチャットの開始に失敗: ${message}`, `Failed to start a new chat: ${message}`);
+      this.post({ type: "init", status: "error", message: errorMessage });
+      this.post({ type: "error", text: errorMessage });
+
+      if (this.client) {
+        this.abandonClient(this.client);
+      }
+      this.forgetSessions();
+
+      this.connectPromise = undefined;
+      await this.ensureClient();
+    }
+  }
+
+  private async handleSelectSession(sessionId: string): Promise<void> {
+    if (!sessionId || sessionId === this.activeId) {
+      return;
+    }
+
+    if (!this.client || this.client.isDisposed) {
+      try {
+        await this.ensureClient();
+      } catch {
+        return;
+      }
+    }
+
+    const client = this.client;
+    if (!client) {
+      return;
+    }
+
+    let session = this.sessions.get(sessionId);
+    if (!session && !client.canLoadSession) {
+      this.post({ type: "error", text: this.uiText("このエージェントは履歴の読み込みに対応していません", "This agent does not support loading session history") });
+      return;
+    }
+
+    const previous = this.active;
+    const seq = this.leave();
+
+    try {
+      let emptyHistory = false;
+      if (!session || session.loading) {
+        this.post({ type: "sessionLoading", title: this.uiText("チャットを読み込み中...", "Loading chat...") });
+        session = session ?? this.loadSession(client, sessionId);
+        await session.loading;
+        emptyHistory = !session.hasHistory;
+      }
+
+      if (seq !== this.switchSeq) {
+        return;
+      }
+
+      await this.show(session);
+      this.post({ type: "sessionLoaded", emptyHistory });
+      await this.refreshSessions();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: this.uiText(`チャットの読み込みに失敗: ${message}`, `Failed to load chat: ${message}`) });
+      this.post({ type: "sessionLoaded" });
+      if (seq === this.switchSeq && previous && this.sessions.get(previous.id) === previous) {
+        await this.show(previous);
+      }
+    }
+  }
+
+  /** Starts replaying a saved session from the agent; its updates are recorded as they arrive. */
+  private loadSession(client: AcpClient, sessionId: string): ChatSession {
+    const session = new ChatSession(sessionId);
+    this.sessions.set(sessionId, session);
+    session.loading = (async () => {
+      try {
+        session.config = await client.loadSession(sessionId);
+        if (session.isAssistantOpen) {
+          this.postTo(session, { type: "assistantDone", stopReason: "replay" });
+        }
+        if (!session.hasHistory) {
+          this.replayLocalHistory(session, await loadSessionHistory(sessionId));
+        }
+      } catch (err) {
+        if (this.sessions.get(sessionId) === session) {
+          this.sessions.delete(sessionId);
+        }
+        throw err;
+      } finally {
+        session.loading = undefined;
+      }
+    })();
+    return session;
+  }
+
+  private replayLocalHistory(session: ChatSession, messages: SessionHistoryMessage[]): void {
+    for (const message of messages) {
+      if (message.role === "user") {
+        if (session.isAssistantOpen) {
+          this.postTo(session, { type: "assistantDone", stopReason: "replay" });
+        }
+        this.postTo(session, { type: "userMessage", text: message.text });
+        continue;
+      }
+
+      if (!session.isAssistantOpen) {
+        this.postTo(session, { type: "assistantStart" });
+      }
+      this.postTo(session, { type: "assistantChunk", text: message.text });
+    }
+
+    if (session.isAssistantOpen) {
+      this.postTo(session, { type: "assistantDone", stopReason: "replay" });
+    }
+  }
+
+  private async handleSetMode(modeId: AgentMode): Promise<void> {
+    const session = this.active;
+    if (!session || session.turn || !this.client) {
+      return;
+    }
+
+    try {
+      session.config = await this.client.setMode(session.id, modeId);
+      await this.rememberConfig(session);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: this.uiText(`モード変更に失敗: ${message}`, `Failed to change mode: ${message}`) });
+    }
+  }
+
+  private async handleSetModel(modelId: string): Promise<void> {
+    const session = this.active;
+    if (!session || session.turn || !this.client) {
+      return;
+    }
+
+    try {
+      session.config = await this.client.setModel(session.id, modelId);
+      await this.rememberConfig(session);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({ type: "error", text: this.uiText(`モデル変更に失敗: ${message}`, `Failed to change model: ${message}`) });
+    }
+  }
+
+  private async handleSetModelParameter(configId: string, value: string): Promise<void> {
+    const session = this.active;
+    if (!session || session.turn || !this.client) {
+      return;
+    }
+
+    try {
+      session.config = await this.client.setModelParameter(session.id, configId, value);
+      await this.rememberConfig(session);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.post({
+        type: "error",
+        text: this.uiText(`モデル設定の変更に失敗: ${message}`, `Failed to change model setting: ${message}`),
+      });
+    }
   }
 
   private async ensureClient(): Promise<void> {
@@ -422,88 +710,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private async applySessionConfig(config: SessionPickerConfig): Promise<void> {
-    this.sessionConfig = config;
-    this.mode = config.currentModeId;
-    this.modelId = config.currentModelId;
-    await this.savePreferences();
-    this.postConfig();
-  }
-
-  private async createClientSession(client: AcpClient, epoch: number): Promise<boolean> {
-    if (epoch !== this.connectEpoch || this.client !== client || client.isDisposed) {
-      return false;
-    }
-
-    const config = await client.newSession(this.mode, this.modelId);
-    if (epoch !== this.connectEpoch || this.client !== client || client.isDisposed) {
-      return false;
-    }
-
-    await this.applySessionConfig(config);
-    return true;
-  }
-
   private abandonClient(client: AcpClient): void {
     client.dispose();
     if (this.client === client) {
       this.client = undefined;
     }
-  }
-
-  private async connectClient(): Promise<void> {
-    const epoch = this.connectEpoch;
-    this.post({ type: "init", status: "loading", message: this.uiText("エージェントに接続中...", "Connecting to the agent...") });
-
-    const config = vscode.workspace.getConfiguration("cursorAgent");
-    const agentPath = config.get<string>("agentPath", "agent");
-    const autoApprove = this.getAutoApprovePermissions();
-    const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? process.cwd();
-    this.workspaceRoot = cwd;
-
-    const client = new AcpClient({ agentPath, cwd, autoApprovePermissions: autoApprove });
-    this.client = client;
-    this.bindClientEvents(client);
-
-    try {
-      await client.start();
-      if (epoch !== this.connectEpoch) {
-        this.abandonClient(client);
-        return;
-      }
-
-      const applied = await this.createClientSession(client, epoch);
-      if (!applied) {
-        return;
-      }
-
-      await this.refreshSessions();
-    } catch (err) {
-      if (epoch !== this.connectEpoch) {
-        this.abandonClient(client);
-        return;
-      }
-
-      const message = err instanceof Error ? err.message : String(err);
-      const errorMessage = this.uiText(`接続に失敗しました: ${message}`, `Connection failed: ${message}`);
-      this.post({ type: "init", status: "error", message: errorMessage });
-      this.post({ type: "error", text: errorMessage });
-      this.abandonClient(client);
-      throw err;
-    }
-  }
-
-  private async handleRetryConnect(): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-
-    this.connectEpoch++;
-    this.connectPromise = undefined;
-    this.client?.dispose();
-    this.client = undefined;
-    this.sessionConfig = undefined;
-    await this.ensureClient().catch(() => undefined);
   }
 
   private async handleRunDiagnostics(): Promise<void> {
@@ -604,159 +815,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.post({
         type: "sessions",
         sessions,
-        currentSessionId: this.client.currentSessionId,
+        currentSessionId: this.activeId,
       });
     } catch {
       // ignore list failures
-    }
-  }
-
-  private async handleSelectSession(sessionId: string): Promise<void> {
-    if (this.busy || !sessionId) {
-      return;
-    }
-
-    if (this.client?.currentSessionId === sessionId) {
-      return;
-    }
-
-    try {
-      await this.ensureClient();
-      if (!this.client?.canLoadSession) {
-        this.post({ type: "error", text: this.uiText("このエージェントは履歴の読み込みに対応していません", "This agent does not support loading session history") });
-        return;
-      }
-
-      this.replayAssistantOpen = false;
-      this.fileEdits.clear();
-      this.changeReviewItems.clear();
-      this.replayBuffer = [];
-      this.clearPromptQueue();
-      this.post({ type: "clear" });
-      this.postChangeReview();
-      this.post({ type: "sessionLoading", title: this.uiText("チャットを読み込み中...", "Loading chat...") });
-
-      this.replayingSession = true;
-      try {
-        this.sessionConfig = await this.client.loadSession(sessionId);
-      } finally {
-        this.replayingSession = false;
-      }
-
-      let hasHistory = this.replayBuffer.some(
-        (message) => message.type === "userMessage" || message.type === "assistantChunk"
-      );
-      this.flushReplayBuffer();
-      this.finishReplayTurn();
-
-      if (!hasHistory) {
-        const localHistory = await loadSessionHistory(sessionId);
-        if (localHistory.length > 0) {
-          this.replayLocalHistory(localHistory);
-          hasHistory = true;
-        }
-      }
-
-      this.mode = this.sessionConfig.currentModeId;
-      this.modelId = this.sessionConfig.currentModelId;
-      await this.savePreferences();
-      this.postConfig();
-      this.post({ type: "sessionLoaded", emptyHistory: !hasHistory });
-      await this.refreshSessions();
-    } catch (err) {
-      this.replayingSession = false;
-      this.replayBuffer = [];
-      const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: this.uiText(`チャットの読み込みに失敗: ${message}`, `Failed to load chat: ${message}`) });
-      this.post({ type: "sessionLoaded" });
-    }
-  }
-
-  private finishReplayTurn(): void {
-    if (!this.replayAssistantOpen) {
-      return;
-    }
-
-    this.post({ type: "assistantDone", stopReason: "replay" });
-    this.replayAssistantOpen = false;
-  }
-
-  private replayLocalHistory(messages: SessionHistoryMessage[]): void {
-    let assistantOpen = false;
-
-    for (const message of messages) {
-      if (message.role === "user") {
-        if (assistantOpen) {
-          this.post({ type: "assistantDone", stopReason: "replay" });
-          assistantOpen = false;
-        }
-        this.post({ type: "userMessage", text: message.text });
-        continue;
-      }
-
-      if (!assistantOpen) {
-        this.post({ type: "assistantStart" });
-        assistantOpen = true;
-      }
-      this.post({ type: "assistantChunk", text: message.text });
-    }
-
-    if (assistantOpen) {
-      this.post({ type: "assistantDone", stopReason: "replay" });
-    }
-  }
-
-  private async handleSetMode(modeId: AgentMode): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-
-    try {
-      await this.ensureClient();
-      this.sessionConfig = await this.client!.setMode(modeId);
-      this.mode = this.sessionConfig.currentModeId;
-      await this.savePreferences();
-      this.postConfig();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: this.uiText(`モード変更に失敗: ${message}`, `Failed to change mode: ${message}`) });
-    }
-  }
-
-  private async handleSetModel(modelId: string): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-
-    try {
-      await this.ensureClient();
-      this.sessionConfig = await this.client!.setModel(modelId);
-      this.modelId = this.sessionConfig.currentModelId;
-      await this.savePreferences();
-      this.postConfig();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: this.uiText(`モデル変更に失敗: ${message}`, `Failed to change model: ${message}`) });
-    }
-  }
-
-  private async handleSetModelParameter(configId: string, value: string): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-
-    try {
-      await this.ensureClient();
-      this.sessionConfig = await this.client!.setModelParameter(configId, value);
-      this.modelId = this.sessionConfig.currentModelId;
-      await this.savePreferences();
-      this.postConfig();
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.post({
-        type: "error",
-        text: this.uiText(`モデル設定の変更に失敗: ${message}`, `Failed to change model setting: ${message}`),
-      });
     }
   }
 
@@ -765,14 +827,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     await this.extensionContext.globalState.update("cursorAgent.modelId", this.modelId);
   }
 
-  private async handleToolUpdate(update: Record<string, unknown>): Promise<void> {
+  private async handleToolUpdate(session: ChatSession, update: Record<string, unknown>): Promise<void> {
     const parsed = parseToolUpdate(update);
     if (!parsed) {
       return;
     }
 
     if (parsed.fileEdit) {
-      const existing = this.fileEdits.get(parsed.fileEdit.id);
+      const existing = session.fileEdits.get(parsed.fileEdit.id);
       const merged: FileEditCardData = {
         ...(existing ?? parsed.fileEdit),
         ...parsed.fileEdit,
@@ -793,14 +855,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }
 
-      this.fileEdits.set(merged.id, merged);
-      this.upsertChangeReviewItem(merged);
+      session.fileEdits.set(merged.id, merged);
+      this.upsertChangeReviewItem(session, merged);
       const { previousText: _previousText, nextText: _nextText, ...publicFileEdit } = merged;
-      this.post({ type: "fileEdit", ...publicFileEdit });
+      this.postTo(session, { type: "fileEdit", ...publicFileEdit });
       return;
     }
 
-    this.post({
+    this.postTo(session, {
       type: "toolActivity",
       id: parsed.toolCallId,
       kind: parsed.kind,
@@ -866,8 +928,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private upsertChangeReviewItem(fileEdit: FileEditCardData): void {
-    const existing = this.changeReviewItems.get(fileEdit.path);
+  private upsertChangeReviewItem(session: ChatSession, fileEdit: FileEditCardData): void {
+    const existing = session.changeReviewItems.get(fileEdit.path);
     const next: ChangeReviewItem = {
       ...(existing ?? {
         path: fileEdit.path,
@@ -885,12 +947,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       canRevert: (existing?.previousText !== undefined ? existing.previousText : fileEdit.previousText) !== undefined,
       updatedAt: new Date().toISOString(),
     };
-    this.changeReviewItems.set(fileEdit.path, next);
-    this.postChangeReview();
+    session.changeReviewItems.set(fileEdit.path, next);
+    if (this.isActive(session)) {
+      this.postChangeReview();
+    }
   }
 
   private postChangeReview(): void {
-    const items = [...this.changeReviewItems.values()].sort(
+    const items = [...(this.active?.changeReviewItems.values() ?? [])].sort(
       (a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt)
     ).map(({ previousText: _previousText, ...item }) => item);
     this.post({ type: "changeReview", items });
@@ -915,7 +979,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async openDiff(filePath: string): Promise<void> {
     const resolved = this.resolvePath(filePath);
-    const item = this.changeReviewItems.get(resolved);
+    const item = this.active?.changeReviewItems.get(resolved);
     if (!item || item.previousText === undefined) {
       await this.openFile(resolved);
       return;
@@ -944,8 +1008,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private async revertFile(filePath: string): Promise<void> {
     const resolved = this.resolvePath(filePath);
-    const item = this.changeReviewItems.get(resolved);
-    if (!item || item.previousText === undefined) {
+    const session = this.active;
+    const item = session?.changeReviewItems.get(resolved);
+    if (!session || !item || item.previousText === undefined) {
       this.post({ type: "error", text: this.uiText("この変更は元内容がないため revert できません", "This change cannot be reverted because its original content is unavailable") });
       return;
     }
@@ -961,9 +1026,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       } else {
         await fs.writeFile(resolved, item.previousText, "utf8");
       }
-      this.changeReviewItems.delete(resolved);
-      this.postChangeReview();
-      this.post({ type: "system", text: this.uiText(`${item.fileName} を元に戻しました`, `Reverted ${item.fileName}`) });
+      session.changeReviewItems.delete(resolved);
+      if (this.isActive(session)) {
+        this.postChangeReview();
+      }
+      this.postTo(session, { type: "system", text: this.uiText(`${item.fileName} を元に戻しました`, `Reverted ${item.fileName}`) });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.post({ type: "error", text: this.uiText(`revert に失敗しました: ${message}`, `Failed to revert: ${message}`) });
@@ -1046,12 +1113,24 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private findPermissionRequest(id: string): { session: ChatSession; request: PermissionRequestState } | undefined {
+    for (const session of this.sessions.values()) {
+      const request = session.permissionRequests.get(id);
+      if (request) {
+        return { session, request };
+      }
+    }
+    return undefined;
+  }
+
   private async resolvePermission(id: string, decision: string): Promise<void> {
-    const request = this.permissionRequests.get(id);
-    if (!request) {
+    const found = this.findPermissionRequest(id);
+    if (!found) {
       return;
     }
-    this.permissionRequests.delete(id);
+    const { session, request } = found;
+    session.permissionRequests.delete(id);
+    session.forget("permissionRequest", id);
     if (decision === "allow-always") {
       await this.savePermissionRule(request);
     }
@@ -1065,28 +1144,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private resolvePlan(id: string, outcome: string): void {
-    const request = this.planRequests.get(id);
-    if (!request) {
+    for (const session of this.sessions.values()) {
+      const request = session.planRequests.get(id);
+      if (!request) {
+        continue;
+      }
+      session.planRequests.delete(id);
+      session.forget("planRequest", id);
+      request.resolve(outcome === "accepted" ? "accepted" : "rejected");
+      if (this.isActive(session)) {
+        this.postRunning();
+      }
       return;
     }
-    this.planRequests.delete(id);
-    request.resolve(outcome === "accepted" ? "accepted" : "rejected");
-    this.postRunning();
   }
 
-  private cancelPendingPlans(): void {
-    for (const request of this.planRequests.values()) {
+  private cancelPendingPlans(session: ChatSession): void {
+    for (const [id, request] of session.planRequests) {
+      session.forget("planRequest", id);
       request.resolve("cancelled");
     }
-    this.planRequests.clear();
+    session.planRequests.clear();
+  }
+
+  // Once a turn is over, nothing should still be waiting for an answer. A
+  // leftover plan request would make every later send queue up as an interrupt.
+  private settlePendingInteractions(session: ChatSession): void {
+    this.cancelPendingPlans(session);
+    for (const [id, request] of session.permissionRequests) {
+      session.forget("permissionRequest", id);
+      request.resolve("reject-once");
+    }
+    session.permissionRequests.clear();
   }
 
   private postRunning(): void {
+    const session = this.active;
+    const turn = session?.turn;
     this.post({
       type: "running",
-      running: this.busy,
-      stopping: this.stopping,
-      waitingForPlan: this.planRequests.size > 0 && this.busy && !this.stopping,
+      running: turn !== undefined,
+      stopping: turn?.stopping ?? false,
+      waitingForPlan: (session?.planRequests.size ?? 0) > 0 && turn !== undefined && !turn.stopping,
     });
   }
 
@@ -1109,31 +1208,33 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postConfig(): void {
-    if (!this.sessionConfig) {
+    const session = this.active;
+    const config = session?.config;
+    if (!session || !config) {
       return;
     }
 
-    const currentMode = this.sessionConfig.modes.find((m) => m.id === this.sessionConfig!.currentModeId);
-    const currentModel = this.sessionConfig.models.find((m) => m.id === this.sessionConfig!.currentModelId);
+    const currentMode = config.modes.find((m) => m.id === config.currentModeId);
+    const currentModel = config.models.find((m) => m.id === config.currentModelId);
 
     this.post({
       type: "config",
       ready: true,
-      sessionId: this.client?.currentSessionId ?? this.sessionConfig.sessionId,
-      modes: this.sessionConfig.modes,
-      models: this.sessionConfig.models,
-      modelParameters: this.sessionConfig.modelParameters,
-      currentModeId: this.sessionConfig.currentModeId,
-      currentModelId: this.sessionConfig.currentModelId,
-      currentModeLabel: currentMode?.name ?? this.sessionConfig.currentModeId,
+      sessionId: session.id,
+      modes: config.modes,
+      models: config.models,
+      modelParameters: config.modelParameters,
+      currentModeId: config.currentModeId,
+      currentModelId: config.currentModelId,
+      currentModeLabel: currentMode?.name ?? config.currentModeId,
       currentModelLabel: formatCurrentModelLabel(
-        this.sessionConfig.currentModelId,
+        config.currentModelId,
         currentModel?.name,
-        this.sessionConfig.modelParameters
+        config.modelParameters
       ),
-      currentModeIcon: MODE_ICONS[this.sessionConfig.currentModeId] ?? "∞",
+      currentModeIcon: MODE_ICONS[config.currentModeId] ?? "∞",
       autoApprovePermissions: this.getAutoApprovePermissions(),
-      busy: this.busy,
+      busy: session.turn !== undefined,
     });
     this.post({ type: "init", status: "ready" });
     void this.handleRequestUsage(false);
@@ -1183,40 +1284,60 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private bindClientEvents(client: AcpClient): void {
-    client.on("update", (update) => {
+    client.on("update", (sessionId: string | undefined, update: Record<string, unknown>) => {
+      const session = this.sessionFor(sessionId);
+      if (!session || !update) {
+        return;
+      }
+
       const sessionUpdate = update.sessionUpdate as string | undefined;
       const text = extractUpdateText(update.content);
 
       if (isUserMessageUpdate(sessionUpdate) && text) {
-        this.finishReplayTurn();
-        this.post({ type: "userMessage", text });
+        if (session.isAssistantOpen && !session.turn) {
+          this.postTo(session, { type: "assistantDone", stopReason: "replay" });
+        }
+        this.postTo(session, { type: "userMessage", text });
         return;
       }
 
       if (isAgentMessageUpdate(sessionUpdate) && text) {
-        if (!this.busy && !this.replayAssistantOpen) {
-          if (!this.replayingSession) {
-            this.post({ type: "assistantStart" });
-          }
-          this.replayAssistantOpen = true;
+        if (!session.isAssistantOpen) {
+          this.postTo(session, { type: "assistantStart" });
         }
-        this.post({ type: "assistantChunk", text });
+        this.postTo(session, { type: "assistantChunk", text });
         return;
       }
 
       if (sessionUpdate === "tool_call" || sessionUpdate === "tool_call_update") {
-        void this.handleToolUpdate(update);
+        void this.handleToolUpdate(session, update);
         return;
       }
 
       if (sessionUpdate === "agent_thought_chunk" && text) {
-        this.post({ type: "thinking", text, append: true });
+        this.postTo(session, { type: "thinking", text, append: true });
       }
     });
 
     client.on(
       "permission",
-      async ({ title, kind, resolve }: { title: string; kind?: string; resolve: (v: string) => void }) => {
+      async ({
+        sessionId,
+        title,
+        kind,
+        resolve,
+      }: {
+        sessionId?: string;
+        title: string;
+        kind?: string;
+        resolve: (v: string) => void;
+      }) => {
+        const session = this.sessionFor(sessionId);
+        if (!session) {
+          resolve("reject-once");
+          return;
+        }
+
         const presentation = this.formatPermission(title, kind);
         const rule = this.findPermissionRule(title, kind);
         if (rule) {
@@ -1230,9 +1351,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           return;
         }
 
+        // A session in the background keeps the card until the user returns to it.
         const id = String(++this.permissionCounter);
-        this.permissionRequests.set(id, { resolve, title, kind, presentation });
-        this.post({
+        session.permissionRequests.set(id, { resolve, title, kind, presentation });
+        this.postTo(session, {
           type: "permissionRequest",
           id,
           title: presentation.headline,
@@ -1245,36 +1367,40 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     client.on(
       "askQuestion",
       async ({
+        sessionId,
         title,
         questions,
+        signal,
         resolve,
       }: {
+        sessionId?: string;
         title?: string;
         questions: Array<{
           id: string;
           prompt: string;
           options: Array<{ id: string; label: string }>;
+          allowMultiple?: boolean;
         }>;
+        signal: AbortSignal;
         resolve: (answers: Array<{ questionId: string; selectedOptionIds: string[] }>) => void;
       }) => {
+        // Questions open a picker over the editor; do not ask on behalf of a chat that is not shown.
+        const session = this.sessionFor(sessionId);
+        if (!session || !this.isActive(session)) {
+          resolve([]);
+          return;
+        }
+
         const answers: Array<{ questionId: string; selectedOptionIds: string[] }> = [];
 
         for (const q of questions) {
-          const picked = await vscode.window.showQuickPick(
-            q.options.map((o) => ({ label: o.label, id: o.id })),
-            {
-              title: title ?? q.prompt,
-              placeHolder: q.prompt,
-              ignoreFocusOut: true,
-            }
-          );
-
+          const picked = await this.pickQuestionOptions(q, title, signal);
           if (!picked) {
             resolve([]);
             return;
           }
 
-          answers.push({ questionId: q.id, selectedOptionIds: [picked.id] });
+          answers.push({ questionId: q.id, selectedOptionIds: picked });
         }
 
         resolve(answers);
@@ -1284,22 +1410,29 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     client.on(
       "createPlan",
       ({
+        sessionId,
         name,
         overview,
         plan,
         todos,
         resolve,
       }: {
+        sessionId?: string;
         name?: string;
         overview?: string;
         plan?: string;
         todos?: PlanTodo[];
         resolve: (outcome: string) => void;
       }) => {
+        const session = this.sessionFor(sessionId);
+        if (!session) {
+          resolve("cancelled");
+          return;
+        }
+
         const id = String(++this.planCounter);
-        this.planRequests.set(id, { resolve });
-        this.view?.show?.(true);
-        this.post({
+        session.planRequests.set(id, { resolve });
+        this.postTo(session, {
           type: "planRequest",
           id,
           name: name ?? this.uiText("プラン", "Plan"),
@@ -1307,13 +1440,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           plan: plan ?? "",
           todos: todos ?? [],
         });
-        this.postRunning();
+        if (this.isActive(session)) {
+          this.view?.show?.(true);
+          this.postRunning();
+        }
       }
     );
 
-    client.on("cancelled", () => {
-      if (this.stopping) {
-        this.finishCancel();
+    client.on("cancelled", (sessionId: string) => {
+      const session = this.sessions.get(sessionId);
+      if (session?.turn?.stopping) {
+        this.finishCancel(session);
       }
     });
 
@@ -1323,118 +1460,127 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
     client.on("exit", (code) => {
       this.output.appendLine(`[${new Date().toISOString()}] agent process exited (code: ${code})`);
+      // A client we disposed on purpose exits after its replacement is already
+      // connected; it must not tear the new one down.
+      if (this.client !== client) {
+        return;
+      }
+
       this.post({ type: "error", text: this.uiText(`エージェントプロセスが終了しました (code: ${code})`, `The agent process exited (code: ${code})`) });
       this.client = undefined;
-      this.busy = false;
-      this.stopping = false;
-      this.clearPromptQueue();
+      for (const session of this.sessions.values()) {
+        if (session.turn) {
+          session.turn = undefined;
+          this.settlePendingInteractions(session);
+          this.postTo(session, { type: "assistantDone", stopReason: "error" });
+        }
+      }
+      // The thread stays on screen; the next message starts a new session.
+      this.forgetSessions();
+      this.postQueue();
       this.postRunning();
       this.setRunningContext(false);
     });
   }
 
+  private pickQuestionOptions(
+    question: { prompt: string; options: Array<{ id: string; label: string }>; allowMultiple?: boolean },
+    title: string | undefined,
+    signal: AbortSignal
+  ): Promise<string[] | undefined> {
+    if (signal.aborted) {
+      return Promise.resolve(undefined);
+    }
+
+    return new Promise((resolve) => {
+      const pick = vscode.window.createQuickPick<vscode.QuickPickItem & { id: string }>();
+      pick.items = question.options.map((o) => ({ label: o.label, id: o.id }));
+      pick.title = title ?? question.prompt;
+      pick.placeholder = question.prompt;
+      pick.ignoreFocusOut = true;
+      pick.canSelectMany = question.allowMultiple === true;
+
+      let settled = false;
+      const finish = (ids: string[] | undefined) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        pick.dispose();
+        resolve(ids && ids.length > 0 ? ids : undefined);
+      };
+      // The agent stopped waiting (the turn was cancelled), so close the picker.
+      const onAbort = () => finish(undefined);
+      signal.addEventListener("abort", onAbort);
+
+      pick.onDidAccept(() => {
+        const items = pick.canSelectMany ? pick.selectedItems : pick.activeItems;
+        finish(items.map((item) => item.id));
+      });
+      pick.onDidHide(() => finish(undefined));
+      pick.show();
+    });
+  }
+
   private async handleCancel(): Promise<void> {
-    if (!this.busy || this.stopping) {
+    const session = this.active;
+    const turn = session?.turn;
+    if (!session || !turn || turn.stopping) {
       return;
     }
 
-    this.cancelPendingPlans();
-    this.stopping = true;
+    this.cancelPendingPlans(session);
+    turn.stopping = true;
     this.postRunning();
 
+    if (!this.client) {
+      this.finishCancel(session);
+      return;
+    }
+
     try {
-      await this.client?.cancel();
+      await this.client.cancel(session.id);
     } catch (err) {
-      if (!this.stopping) {
+      if (session.turn !== turn) {
         return;
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      this.post({ type: "error", text: this.uiText(`停止に失敗しました: ${message}`, `Failed to stop: ${message}`) });
-      this.drainAfterCancel = false;
-      this.stopping = false;
-      this.busy = false;
+      this.postTo(session, { type: "error", text: this.uiText(`停止に失敗しました: ${message}`, `Failed to stop: ${message}`) });
+      this.endTurn(session, "error");
+    }
+  }
+
+  private endTurn(session: ChatSession, stopReason: string): void {
+    session.turn = undefined;
+    this.settlePendingInteractions(session);
+    this.postTo(session, { type: "assistantDone", stopReason, endedAt: Date.now() });
+    if (this.isActive(session)) {
       this.postRunning();
       this.setRunningContext(false);
-      this.post({ type: "assistantDone", stopReason: "error" });
       this.postConfig();
     }
   }
 
-  private finishCancel(): void {
-    if (!this.busy && !this.stopping) {
+  private finishCancel(session: ChatSession): void {
+    const turn = session.turn;
+    if (!turn) {
       return;
     }
 
-    const shouldDrain = this.drainAfterCancel;
-    this.drainAfterCancel = false;
-    this.promptGeneration++;
-    this.stopping = false;
-    this.busy = false;
-    this.post({ type: "cancelled" });
-    this.post({ type: "assistantDone", stopReason: "cancelled" });
-    this.postRunning();
-    this.setRunningContext(false);
-    this.postConfig();
-
-    if (shouldDrain) {
-      void this.drainQueue();
-    }
-  }
-
-  private async handleNewChat(): Promise<void> {
-    this.connectEpoch++;
-    const pendingConnect = this.connectPromise;
-    this.connectPromise = undefined;
-
-    if (pendingConnect) {
-      await pendingConnect.catch(() => undefined);
+    session.turn = undefined;
+    this.settlePendingInteractions(session);
+    this.postTo(session, { type: "cancelled" });
+    this.postTo(session, { type: "assistantDone", stopReason: "cancelled" });
+    if (this.isActive(session)) {
+      this.postRunning();
+      this.setRunningContext(false);
+      this.postConfig();
     }
 
-    this.sessionConfig = undefined;
-    this.cancelPendingPlans();
-    this.permissionRequests.clear();
-    this.fileEdits.clear();
-    this.changeReviewItems.clear();
-    this.busy = false;
-    this.stopping = false;
-    this.clearPromptQueue();
-    this.setRunningContext(false);
-    this.replayAssistantOpen = false;
-    this.post({ type: "clear" });
-    this.postChangeReview();
-    this.post({ type: "init", status: "loading", message: this.uiText("新しいチャットを準備中...", "Preparing a new chat...") });
-
-    const epoch = this.connectEpoch;
-
-    try {
-      if (!this.client || this.client.isDisposed) {
-        await this.ensureClient();
-        return;
-      }
-
-      const applied = await this.createClientSession(this.client, epoch);
-      if (!applied) {
-        return;
-      }
-
-      await this.refreshSessions();
-    } catch (err) {
-      if (epoch !== this.connectEpoch) {
-        return;
-      }
-
-      const message = err instanceof Error ? err.message : String(err);
-      const errorMessage = this.uiText(`新しいチャットの開始に失敗: ${message}`, `Failed to start a new chat: ${message}`);
-      this.post({ type: "init", status: "error", message: errorMessage });
-      this.post({ type: "error", text: errorMessage });
-
-      if (this.client) {
-        this.abandonClient(this.client);
-      }
-
-      this.connectPromise = undefined;
-      await this.ensureClient();
+    if (turn.drainAfterCancel) {
+      void this.drainQueue(session);
     }
   }
 
@@ -1469,35 +1615,52 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    if (this.planRequests.size > 0) {
-      await this.interruptWithPrompt(trimmed, sanitizedImages);
+    if (!this.active) {
+      // The agent process went away; reconnecting starts a new session.
+      try {
+        await this.ensureClient();
+      } catch {
+        return;
+      }
+    }
+    const session = this.active;
+    if (!session) {
       return;
     }
 
-    if (this.busy) {
-      this.enqueuePrompt(trimmed, sanitizedImages);
+    if (session.planRequests.size > 0) {
+      await this.interruptWithPrompt(session, trimmed, sanitizedImages);
       return;
     }
 
-    await this.sendNow(trimmed, sanitizedImages);
+    if (session.turn) {
+      this.enqueuePrompt(session, trimmed, sanitizedImages);
+      return;
+    }
+
+    await this.sendNow(session, trimmed, sanitizedImages);
   }
 
-  private async interruptWithPrompt(text: string, images: PromptImageAttachment[]): Promise<void> {
-    this.promptQueue.unshift({
+  private async interruptWithPrompt(session: ChatSession, text: string, images: PromptImageAttachment[]): Promise<void> {
+    session.queue.unshift({
       id: `q-${++this.queueSeq}`,
       text,
       images,
       kind: "interrupt",
     });
     this.postQueue();
-    this.drainAfterCancel = true;
-    if (!this.stopping) {
+    if (!session.turn) {
+      await this.drainQueue(session);
+      return;
+    }
+    session.turn.drainAfterCancel = true;
+    if (!session.turn.stopping) {
       await this.handleCancel();
     }
   }
 
-  private enqueuePrompt(text: string, images: PromptImageAttachment[]): void {
-    this.promptQueue.push({
+  private enqueuePrompt(session: ChatSession, text: string, images: PromptImageAttachment[]): void {
+    session.queue.push({
       id: `q-${++this.queueSeq}`,
       text,
       images,
@@ -1507,50 +1670,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private removeQueuedPrompt(id: string): void {
-    const next = this.promptQueue.filter((item) => item.id !== id);
-    if (next.length === this.promptQueue.length) {
+    const session = this.active;
+    if (!session) {
       return;
     }
-    this.promptQueue = next;
+    const next = session.queue.filter((item) => item.id !== id);
+    if (next.length === session.queue.length) {
+      return;
+    }
+    session.queue = next;
     this.postQueue();
   }
 
   private async sendQueuedPrompt(id: string): Promise<void> {
-    const index = this.promptQueue.findIndex((item) => item.id === id);
+    const session = this.active;
+    if (!session) {
+      return;
+    }
+    const index = session.queue.findIndex((item) => item.id === id);
     if (index < 0) {
       return;
     }
 
-    const [item] = this.promptQueue.splice(index, 1);
+    const [item] = session.queue.splice(index, 1);
 
-    if (this.busy) {
-      this.promptQueue.unshift({ ...item, kind: "interrupt" });
+    if (session.turn) {
+      session.queue.unshift({ ...item, kind: "interrupt" });
       this.postQueue();
-      this.drainAfterCancel = true;
-      if (!this.stopping) {
+      session.turn.drainAfterCancel = true;
+      if (!session.turn.stopping) {
         await this.handleCancel();
       }
       return;
     }
 
     this.postQueue();
-    await this.sendNow(item.text, item.images);
-  }
-
-  private clearPromptQueue(): void {
-    if (this.promptQueue.length === 0 && !this.drainAfterCancel) {
-      this.postQueue();
-      return;
-    }
-    this.promptQueue = [];
-    this.drainAfterCancel = false;
-    this.postQueue();
+    await this.sendNow(session, item.text, item.images);
   }
 
   private postQueue(): void {
     this.post({
       type: "promptQueue",
-      items: this.promptQueue.map((item) => ({
+      items: (this.active?.queue ?? []).map((item) => ({
         id: item.id,
         text: item.text,
         kind: item.kind,
@@ -1559,85 +1720,74 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  private async drainQueue(): Promise<void> {
-    if (this.busy || this.stopping) {
+  private async drainQueue(session: ChatSession): Promise<void> {
+    if (session.turn) {
       return;
     }
 
-    const next = this.promptQueue.shift();
-    this.postQueue();
+    const next = session.queue.shift();
+    if (this.isActive(session)) {
+      this.postQueue();
+    }
     if (!next) {
       return;
     }
 
-    await this.sendNow(next.text, next.images);
+    await this.sendNow(session, next.text, next.images);
   }
 
-  private async sendNow(text: string, images: PromptImageAttachment[]): Promise<void> {
-    if (this.busy || (!text && images.length === 0)) {
+  private async sendNow(session: ChatSession, text: string, images: PromptImageAttachment[]): Promise<void> {
+    const client = this.client;
+    if (session.turn || (!text && images.length === 0)) {
+      return;
+    }
+    if (!client || client.isDisposed || this.sessions.get(session.id) !== session) {
       return;
     }
 
-    try {
-      await this.ensureClient();
-    } catch {
-      return;
+    const turn: Turn = { stopping: false, drainAfterCancel: false };
+    session.turn = turn;
+    this.postTo(session, { type: "userMessage", text, images });
+    this.postTo(session, { type: "assistantStart", startedAt: Date.now() });
+    if (this.isActive(session)) {
+      this.setRunningContext(true);
+      this.postRunning();
+      this.postConfig();
     }
-
-    const generation = ++this.promptGeneration;
-    this.busy = true;
-    this.stopping = false;
-    this.setRunningContext(true);
-    this.post({ type: "userMessage", text, images });
-    this.post({ type: "assistantStart" });
-    this.postRunning();
-    this.postConfig();
 
     try {
       const root = this.workspaceRoot || process.cwd();
       const promptBlocks = await buildPromptBlocks(text, root, images);
-      if (generation !== this.promptGeneration) {
+      // Stopped while the prompt was being prepared.
+      if (session.turn !== turn) {
         return;
       }
-      const result = await this.client!.prompt(promptBlocks);
+      const result = await client.prompt(session.id, promptBlocks);
 
-      if (generation !== this.promptGeneration) {
-        return;
-      }
-
-      if (this.stopping || result.stopReason === "cancelled" || result.stopReason === "canceled") {
-        this.finishCancel();
+      if (session.turn !== turn) {
         return;
       }
 
-      this.busy = false;
-      this.post({ type: "assistantDone", stopReason: result.stopReason });
-      this.postRunning();
-      this.setRunningContext(false);
-      this.postConfig();
-      await this.drainQueue();
+      if (turn.stopping || result.stopReason === "cancelled" || result.stopReason === "canceled") {
+        this.finishCancel(session);
+        return;
+      }
+
+      this.endTurn(session, result.stopReason);
+      await this.drainQueue(session);
     } catch (err) {
-      if (generation !== this.promptGeneration) {
-        return;
-      }
-
-      if (this.stopping) {
-        this.finishCancel();
+      if (session.turn !== turn) {
         return;
       }
 
       const message = err instanceof Error ? err.message : String(err);
-      if (message === "cancelled") {
-        this.finishCancel();
+      if (turn.stopping || message === "cancelled") {
+        this.finishCancel(session);
         return;
       }
 
-      this.busy = false;
-      this.post({ type: "error", text: message });
-      this.post({ type: "assistantDone", stopReason: "error" });
-      this.postRunning();
-      this.setRunningContext(false);
-      this.postConfig();
+      this.postTo(session, { type: "error", text: message });
+      this.endTurn(session, "error");
     }
   }
 
@@ -1645,35 +1795,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     void vscode.commands.executeCommand("setContext", "cursorAgent.running", running);
   }
 
-  private post(message: Record<string, unknown>): void {
-    if (this.replayingSession) {
-      this.replayBuffer.push(message);
-      return;
+  /** Records a message in the session's thread and shows it if the session is on screen. */
+  private postTo(session: ChatSession, message: ThreadMessage): void {
+    session.record(message);
+    if (this.isActive(session)) {
+      this.post(message);
     }
-    void this.view?.webview.postMessage(message);
   }
 
-  private flushReplayBuffer(): void {
-    const coalesced: Record<string, unknown>[] = [];
-    for (const message of this.replayBuffer) {
-      const last = coalesced[coalesced.length - 1];
-      if (
-        last &&
-        message.type === last.type &&
-        (message.type === "assistantChunk" || message.type === "thinking") &&
-        typeof last.text === "string" &&
-        typeof message.text === "string"
-      ) {
-        last.text += message.text;
-        continue;
-      }
-      coalesced.push({ ...message });
-    }
-
-    this.replayBuffer = [];
-    for (const message of coalesced) {
-      void this.view?.webview.postMessage(message);
-    }
+  private post(message: Record<string, unknown>): void {
+    void this.view?.webview.postMessage(message);
   }
 
   private getHtml(webview: vscode.Webview): string {

@@ -128,16 +128,28 @@ function parsePlanTodos(raw: unknown): PlanTodo[] {
 
 const CANCEL_TIMEOUT_MS = 5_000;
 
+export type SessionConfigWithId = SessionPickerConfig & { sessionId: string };
+
+function paramSessionId(params?: Record<string, unknown>): string | undefined {
+  return typeof params?.sessionId === "string" ? params.sessionId : undefined;
+}
+
+/**
+ * Speaks ACP to one `agent acp` process. It keeps no notion of a "current"
+ * session: every call names its session and every event carries the session
+ * it belongs to, so the caller decides what to show.
+ */
 export class AcpClient extends EventEmitter {
   private process: ChildProcessWithoutNullStreams | undefined;
   private rl: readline.Interface | undefined;
   private nextId = 1;
   private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: unknown) => void }>();
-  private sessionId: string | undefined;
   private disposed = false;
-  private running = false;
+  // Prompts in flight, by session.
+  private runningPrompts = new Map<string, number>();
   private promptRun = 0;
-  private interactionReleases = new Set<InteractionRelease>();
+  // Interactions waiting for the user, by session ("" when the agent did not say).
+  private interactionReleases = new Map<string, Set<InteractionRelease>>();
   private supportsSessionList = false;
   private supportsLoadSession = false;
 
@@ -154,14 +166,6 @@ export class AcpClient extends EventEmitter {
 
   getAutoApprovePermissions(): boolean {
     return this.autoApprovePermissions;
-  }
-
-  get currentSessionId(): string | undefined {
-    return this.sessionId;
-  }
-
-  get isRunning(): boolean {
-    return this.running;
   }
 
   get isDisposed(): boolean {
@@ -190,7 +194,14 @@ export class AcpClient extends EventEmitter {
       }
     });
 
+    // Writing to the agent after it exits fails with EPIPE; without a listener
+    // that error would be thrown as an uncaught exception.
+    this.process.stdin.on("error", (err) => {
+      this.emit("log", `Failed to write to the agent process: ${err.message}`);
+    });
+
     this.process.on("exit", (code) => {
+      this.process = undefined;
       this.emit("exit", code);
       this.cleanup();
     });
@@ -247,7 +258,8 @@ export class AcpClient extends EventEmitter {
     };
   }
 
-  async loadSession(sessionId: string): Promise<SessionPickerConfig> {
+  /** Loads a saved session; its history arrives as updates for it before this resolves. */
+  async loadSession(sessionId: string): Promise<SessionConfigWithId> {
     if (!this.supportsLoadSession) {
       throw new Error("This agent does not support loading session history");
     }
@@ -258,11 +270,10 @@ export class AcpClient extends EventEmitter {
       mcpServers: [],
     })) as Parameters<typeof parseSessionConfig>[0];
 
-    this.sessionId = sessionId;
-    return parseSessionConfig({ ...result, sessionId });
+    return { ...parseSessionConfig({ ...result, sessionId }), sessionId };
   }
 
-  async newSession(mode: AgentMode = "agent", modelId?: string): Promise<SessionPickerConfig> {
+  async newSession(mode: AgentMode = "agent", modelId?: string): Promise<SessionConfigWithId> {
     const preferredModelId = modelId ? normalizeModelId(modelId) : undefined;
     const preferredParams = modelId ? parseModelIdParameters(modelId) : [];
 
@@ -273,7 +284,7 @@ export class AcpClient extends EventEmitter {
       ...(preferredModelId ? { model: preferredModelId } : {}),
     })) as Parameters<typeof parseSessionConfig>[0];
 
-    this.sessionId = result.sessionId;
+    const sessionId = result.sessionId;
     let config = parseSessionConfig(result);
 
     // A previously saved model may no longer be offered by the CLI (models get
@@ -289,7 +300,7 @@ export class AcpClient extends EventEmitter {
         );
       } else {
         try {
-          config = await this.setModel(preferredModelId);
+          config = await this.setModel(sessionId, preferredModelId);
         } catch (err) {
           this.emit("log", `Could not restore model "${preferredModelId}": ${errorMessage(err)}`);
         }
@@ -297,7 +308,7 @@ export class AcpClient extends EventEmitter {
     }
 
     if (config.currentModelId !== preferredModelId) {
-      return config;
+      return { ...config, sessionId };
     }
 
     for (const param of preferredParams) {
@@ -309,23 +320,19 @@ export class AcpClient extends EventEmitter {
         continue;
       }
       try {
-        config = await this.setModelParameter(param.id, param.value);
+        config = await this.setModelParameter(sessionId, param.id, param.value);
       } catch (err) {
         this.emit("log", `Could not restore model parameter "${param.id}=${param.value}": ${errorMessage(err)}`);
       }
     }
 
-    return config;
+    return { ...config, sessionId };
   }
 
-  async setMode(modeId: AgentMode): Promise<SessionPickerConfig> {
-    if (!this.sessionId) {
-      return this.newSession(modeId);
-    }
-
-    await this.send("session/set_mode", { sessionId: this.sessionId, modeId });
+  async setMode(sessionId: string, modeId: AgentMode): Promise<SessionPickerConfig> {
+    await this.send("session/set_mode", { sessionId, modeId });
     const result = (await this.send("session/set_config_option", {
-      sessionId: this.sessionId,
+      sessionId,
       configId: "mode",
       value: modeId,
     })) as { configOptions: Parameters<typeof parseConfigOptions>[0] };
@@ -333,28 +340,19 @@ export class AcpClient extends EventEmitter {
     return parseConfigOptions(result.configOptions);
   }
 
-  async setModel(modelId: string): Promise<SessionPickerConfig> {
-    const normalized = normalizeModelId(modelId);
-    if (!this.sessionId) {
-      return this.newSession("agent", modelId);
-    }
-
+  async setModel(sessionId: string, modelId: string): Promise<SessionPickerConfig> {
     const result = (await this.send("session/set_config_option", {
-      sessionId: this.sessionId,
+      sessionId,
       configId: "model",
-      value: normalized,
+      value: normalizeModelId(modelId),
     })) as { configOptions: Parameters<typeof parseConfigOptions>[0] };
 
     return parseConfigOptions(result.configOptions);
   }
 
-  async setModelParameter(configId: string, value: string): Promise<SessionPickerConfig> {
-    if (!this.sessionId) {
-      throw new Error("No active session");
-    }
-
+  async setModelParameter(sessionId: string, configId: string, value: string): Promise<SessionPickerConfig> {
     const result = (await this.send("session/set_config_option", {
-      sessionId: this.sessionId,
+      sessionId,
       configId,
       value,
     })) as { configOptions: Parameters<typeof parseConfigOptions>[0] };
@@ -362,53 +360,47 @@ export class AcpClient extends EventEmitter {
     return parseConfigOptions(result.configOptions);
   }
 
-  async prompt(blocks: PromptContentBlock[]): Promise<{ stopReason: string }> {
-    if (!this.sessionId) {
-      await this.newSession();
-    }
-
+  async prompt(sessionId: string, blocks: PromptContentBlock[]): Promise<{ stopReason: string }> {
     if (blocks.length === 0) {
       throw new Error("prompt must include at least one content block");
     }
 
-    this.running = true;
-    this.promptRun++;
+    const run = ++this.promptRun;
+    this.runningPrompts.set(sessionId, run);
     try {
       const result = (await this.send("session/prompt", {
-        sessionId: this.sessionId,
+        sessionId,
         prompt: blocks,
       })) as { stopReason: string };
 
       return result;
     } finally {
-      this.running = false;
+      if (this.runningPrompts.get(sessionId) === run) {
+        this.runningPrompts.delete(sessionId);
+      }
     }
   }
 
-  async cancel(): Promise<void> {
-    if (!this.running && !this.sessionId) {
-      return;
-    }
+  /** Stops the session's prompt; emits "cancelled" with the session id if the prompt does not end by itself. */
+  async cancel(sessionId: string): Promise<void> {
+    this.releaseBlockedInteractions(sessionId);
 
-    this.releaseBlockedInteractions();
-
-    if (!this.sessionId || !this.running) {
-      this.running = false;
-      this.emit("cancelled");
+    const run = this.runningPrompts.get(sessionId);
+    if (run === undefined) {
+      this.emit("cancelled", sessionId);
       return;
     }
 
     // session/cancel is a notification in ACP. Sent as a request, the agent
     // rejects it with "Method not found" and keeps working.
-    this.notify("session/cancel", { sessionId: this.sessionId });
+    this.notify("session/cancel", { sessionId });
 
     // The pending session/prompt resolves with stopReason "cancelled".
     // Fall back in case the agent never answers.
-    const run = this.promptRun;
     setTimeout(() => {
-      if (this.running && this.promptRun === run) {
-        this.running = false;
-        this.emit("cancelled");
+      if (this.runningPrompts.get(sessionId) === run) {
+        this.runningPrompts.delete(sessionId);
+        this.emit("cancelled", sessionId);
       }
     }, CANCEL_TIMEOUT_MS);
   }
@@ -497,7 +489,7 @@ export class AcpClient extends EventEmitter {
 
     switch (msg.method) {
       case "session/update":
-        this.emit("update", msg.params?.update as Record<string, unknown>);
+        this.emit("update", paramSessionId(msg.params), msg.params?.update as Record<string, unknown>);
         break;
       case "session/request_permission":
         void this.handlePermission(msg.id!, msg.params);
@@ -522,24 +514,41 @@ export class AcpClient extends EventEmitter {
     }
   }
 
-  private trackInteraction<T>(run: (release: InteractionRelease) => Promise<T>): Promise<T> {
+  private trackInteraction<T>(
+    sessionId: string | undefined,
+    run: () => Promise<T>
+  ): Promise<T> {
+    const key = sessionId ?? "";
+    let releases = this.interactionReleases.get(key);
+    if (!releases) {
+      releases = new Set();
+      this.interactionReleases.set(key, releases);
+    }
+    const set = releases;
+
     let release: InteractionRelease = () => undefined;
     const tracked = new Promise<T>((resolve, reject) => {
       release = () => reject(new Error("cancelled"));
-      this.interactionReleases.add(release);
-      void run(release).then(resolve, reject);
+      set.add(release);
+      void run().then(resolve, reject);
     });
 
     return tracked.finally(() => {
-      this.interactionReleases.delete(release);
+      set.delete(release);
     });
   }
 
-  private releaseBlockedInteractions(): void {
-    for (const release of this.interactionReleases) {
-      release();
+  private releaseBlockedInteractions(sessionId: string): void {
+    for (const key of [sessionId, ""]) {
+      const releases = this.interactionReleases.get(key);
+      if (!releases) {
+        continue;
+      }
+      for (const release of releases) {
+        release();
+      }
+      this.interactionReleases.delete(key);
     }
-    this.interactionReleases.clear();
   }
 
   private async handlePermission(id: number, params?: Record<string, unknown>): Promise<void> {
@@ -548,28 +557,27 @@ export class AcpClient extends EventEmitter {
       return;
     }
 
+    const sessionId = paramSessionId(params);
     const toolCall = params?.toolCall as { title?: string; kind?: string } | undefined;
     const title = toolCall?.title ?? "Tool permission request";
     const kind = toolCall?.kind;
 
     try {
       const decision = await this.trackInteraction(
-        (release) =>
+        sessionId,
+        () =>
           new Promise<string>((resolve) => {
-            const wrappedResolve = (value: string) => {
-              this.interactionReleases.delete(release);
-              resolve(value);
-            };
-            this.emit("permission", { title, kind, resolve: wrappedResolve });
+            this.emit("permission", { sessionId, title, kind, resolve });
           })
       );
       this.respond(id, { outcome: { outcome: "selected", optionId: decision } });
     } catch {
-      this.respond(id, { outcome: { outcome: "selected", optionId: "reject-once" } });
+      this.respond(id, { outcome: { outcome: "cancelled" } });
     }
   }
 
   private async handleAskQuestion(id: number, params?: Record<string, unknown>): Promise<void> {
+    const sessionId = paramSessionId(params);
     const questions = (params?.questions as Array<{
       id: string;
       prompt: string;
@@ -577,15 +585,19 @@ export class AcpClient extends EventEmitter {
       allowMultiple?: boolean;
     }>) ?? [];
 
+    const abort = new AbortController();
     try {
       const answers = await this.trackInteraction(
-        (release) =>
+        sessionId,
+        () =>
           new Promise<Array<{ questionId: string; selectedOptionIds: string[] }>>((resolve) => {
-            const wrappedResolve = (value: Array<{ questionId: string; selectedOptionIds: string[] }>) => {
-              this.interactionReleases.delete(release);
-              resolve(value);
-            };
-            this.emit("askQuestion", { title: params?.title as string | undefined, questions, resolve: wrappedResolve });
+            this.emit("askQuestion", {
+              sessionId,
+              title: params?.title as string | undefined,
+              questions,
+              signal: abort.signal,
+              resolve,
+            });
           })
       );
 
@@ -596,26 +608,26 @@ export class AcpClient extends EventEmitter {
         },
       });
     } catch {
+      abort.abort();
       this.respond(id, { outcome: { outcome: "cancelled" } });
     }
   }
 
   private async handleCreatePlan(id: number, params?: Record<string, unknown>): Promise<void> {
+    const sessionId = paramSessionId(params);
     let outcome: string;
     try {
       outcome = await this.trackInteraction(
-        (release) =>
+        sessionId,
+        () =>
           new Promise<string>((resolve) => {
-            const wrappedResolve = (value: string) => {
-              this.interactionReleases.delete(release);
-              resolve(value);
-            };
             this.emit("createPlan", {
+              sessionId,
               name: params?.name as string | undefined,
               overview: params?.overview as string | undefined,
               plan: params?.plan as string | undefined,
               todos: parsePlanTodos(params?.todos),
-              resolve: wrappedResolve,
+              resolve,
             });
           })
       );

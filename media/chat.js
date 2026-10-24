@@ -65,7 +65,7 @@
     openImage: ["クリックして拡大表示", "Click to enlarge"],
     closeImage: ["閉じる", "Close"],
     openFile: ["クリックしてファイルを開く", "Click to open file"],
-    historyLoadFailed: ["このセッションの表示用履歴を読み込めませんでした。エージェント側の状態は復元済みなので、続きからメッセージを送れます。", "The display history for this session could not be loaded. The agent state was restored, so you can continue sending messages."],
+    historyLoadFailed: ["このチャットには表示できる履歴がありません。途中で停止したやり取りは、エージェントに保存されないことがあります。続きからメッセージを送れます。", "This chat has no history to show. Exchanges that were stopped partway may not be saved by the agent. You can keep sending messages."],
     usage: ["使用量", "Usage"],
     usageLoading: ["使用量を取得中...", "Loading usage..."],
     usageUnavailable: ["使用量を取得できません", "Usage unavailable"],
@@ -223,7 +223,7 @@
     const pickerBlocked = !sessionReady || busy;
     modePill.disabled = pickerBlocked;
     modelPill.disabled = pickerBlocked;
-    historyBtn.disabled = pickerBlocked;
+    historyBtn.disabled = !sessionReady;
     autoRunPill.disabled = !sessionReady;
     inputEl.disabled = !sessionReady;
     sendBtn.disabled = !sessionReady;
@@ -1182,7 +1182,8 @@
 
   function toggleMenu(menuName) {
     if (!sessionReady) return;
-    if (busy && menuName !== "usage") return;
+    // Mode and model belong to the running turn; switching chats does not stop it.
+    if (busy && menuName !== "usage" && menuName !== "history") return;
     if (openMenu === menuName) {
       closeMenus();
       return;
@@ -2399,7 +2400,7 @@
     return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
   }
 
-  function appendTurnFooter() {
+  function appendTurnFooter(endedAt) {
     if (!turnBody) return;
 
     const files = new Map();
@@ -2417,7 +2418,7 @@
     if (turnStartedAt) {
       const time = document.createElement("span");
       time.className = "turn-footer-time";
-      time.textContent = t("workedFor", formatElapsed(Date.now() - turnStartedAt));
+      time.textContent = t("workedFor", formatElapsed((endedAt || Date.now()) - turnStartedAt));
       footer.appendChild(time);
     }
 
@@ -2844,7 +2845,6 @@
   });
 
   newChatBtn.addEventListener("click", () => {
-    if (busy && !stopping) return;
     vscode.postMessage({ type: "newChat" });
   });
 
@@ -2968,7 +2968,8 @@
 
       case "assistantStart":
         resetTurnState();
-        turnStartedAt = Date.now();
+        // A chat shown again replays its turns with their original times.
+        turnStartedAt = msg.startedAt || Date.now();
         setRunning(true, false);
         ensureAssistantTurn();
         break;
@@ -3058,6 +3059,8 @@
       }
 
       case "assistantDone":
+        dismissPermissionCards();
+        dismissPlanCards();
         finalizeToolPanel();
         settleThoughtBlocks();
         if (currentAssistantEl) {
@@ -3067,7 +3070,7 @@
         workingEl?.remove();
         markFinalText();
         if (!["replay", "error", "cancelled"].includes(msg.stopReason)) {
-          appendTurnFooter();
+          appendTurnFooter(msg.endedAt);
         }
         resetTurnState();
         setRunning(false, false);
